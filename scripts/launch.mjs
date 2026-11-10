@@ -1,0 +1,7 @@
+import {spawn} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..'),url='http://127.0.0.1:'+(process.env.PORT||8790);
+async function running(){try{const r=await fetch(url+'/api/health',{signal:AbortSignal.timeout(1000)});return (await r.json()).app==='meshdesk';}catch{return false;}}
+async function openBrowser(){let target=url;if(process.argv[2]){const {token}=await fetch(url+'/api/bootstrap').then(r=>r.json());const response=await fetch(url+'/api/projects/open-file',{method:'POST',headers:{'Content-Type':'application/json','X-Session-Token':token},body:JSON.stringify({path:path.resolve(process.argv[2])})});const project=await response.json();if(!response.ok)throw Error(project.error);target+='/?project='+encodeURIComponent(project.id);}spawn('open',['-a','Google Chrome',target],{stdio:'ignore'});}
+if(await running()){await openBrowser();console.log('Opened the running Meshdesk.');}else{const server=spawn(process.execPath,[path.join(root,'server/index.mjs')],{cwd:root,stdio:'inherit'});let stopping=false;const stop=()=>{if(stopping)return;stopping=true;server.kill('SIGTERM');};process.on('SIGINT',stop);process.on('SIGTERM',stop);server.on('exit',code=>process.exit(code||0));for(let i=0;i<30;i++){if(await running()){await openBrowser();break;}await new Promise(r=>setTimeout(r,500));}console.log('Keep this Terminal window open. Press Control+C to stop the app.');}
