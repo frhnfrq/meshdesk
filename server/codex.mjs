@@ -37,6 +37,7 @@ export class CodexBridge extends EventEmitter {
   }
   write(message){if(!this.child?.stdin.writable)throw new Error('Codex is not connected.');this.child.stdin.write(JSON.stringify(message)+'\n');}
   request(method,params={},timeout=45000){return new Promise((resolve,reject)=>{const id=this.nextId++;const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error(`Codex ${method} timed out. Please try again.`));},timeout);this.pending.set(id,{resolve,reject,timer});try{this.write({id,method,params});}catch(error){clearTimeout(timer);this.pending.delete(id);reject(error);}});}
+  async listModels(){await this.connect();const {data}=await this.request('model/list',{});return (data||[]).filter(m=>!m.hidden).map(m=>({id:m.model||m.id,label:m.displayName||m.model||m.id,detail:m.description||'',efforts:(m.supportedReasoningEfforts||[]).map(e=>e.reasoningEffort),defaultEffort:m.defaultReasoningEffort||'',isDefault:!!m.isDefault}));}
   status(){return {state:this.state,signedIn:!!this.signedIn,accountType:this.accountType||null};}
   close(){this.child?.kill('SIGTERM');}
 }

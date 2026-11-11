@@ -1,3 +1,7 @@
 {
-  "codexBinary": "codex"
+  "codexBinary": "codex",
+  "claudeBinary": "",
+  "blenderBinary": "/Applications/Blender.app/Contents/MacOS/Blender",
+  "imageApiKey": "",
+  "imageModel": "gpt-image-1"
 }

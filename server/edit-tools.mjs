@@ -1,23 +1,98 @@
+import path from 'node:path';
+import {presetEdit,PRESETS} from './presets.mjs';
+import {generateTexture} from './textures.mjs';
 const string={type:'string'};
 const tool=(name,description,properties,required=Object.keys(properties))=>({type:'function',name,description,inputSchema:{type:'object',properties,required,additionalProperties:false}});
+/** Bumped whenever the tool list changes, so saved conversations start a fresh agent thread that knows the new tools. */
+export const TOOLS_VERSION=3;
 export const editTools=[
  tool('library_list','Find active or removed library assets by name. Use exact returned asset IDs for operations.',{query:string}),
  tool('asset_rename','Rename an asset and its working file, preserving the original and updating the viewer. Supply filename or stem, without folders.',{assetId:string,name:string}),
  tool('asset_remove','Remove an asset from the active library into the recoverable Removed collection. Never permanently deletes originals.',{assetId:string}),
  tool('asset_restore','Restore a removed asset to the active library.',{assetId:string}),
  tool('asset_use_version','Make a saved version current, or use versionId original to revert. Preserves all versions.',{assetId:string,versionId:string}),
- tool('blender_edit','Run Python in Blender on a copy of a model. The scene is ALREADY imported with matched textures; bpy and job_dir are available. Only modify the scene/materials; do not import/reset/export/save yourself. The app exports FBX, BLEND with linked external textures and an embedded GLB preview and publishes a new version automatically. Writes are limited to the disposable job; no network or unrelated files. On failure no version is published. Give a concise label describing the change.',{assetId:string,label:string,script:string})
+ tool('blender_inspect','Look before you edit. Runs Python in Blender on a throwaway copy of a model and saves NOTHING. Returns scene statistics, a per-mesh table, game-readiness findings and everything your script print()s. The scene is already imported; bpy, job_dir and the md helper library are available. Use it to learn mesh, material and UV-layer names, measure things, or dry-run an edit script to see whether it raises. script may be empty for a plain report. Set render to "true" to also receive a four-view image (three-quarter, front, side, top) of the result.',{assetId:string,script:string,render:string}),
+ tool('blender_edit','Run Python in Blender on a copy of a model and save the result as a version. The scene is ALREADY imported with matched textures; bpy, job_dir and the md helper library (tested helpers for primitives, materials, UVs, procedural textures, baking and atlasing: prefer them to hand-written bpy) are available. Only modify the scene/materials; do not import/reset/export/save yourself. The app exports FBX, BLEND with linked external textures and an embedded GLB preview automatically. Writes are limited to the disposable job; no network or unrelated files. On failure nothing is saved and you receive the failing line of your script. On success you receive before/after statistics, readiness findings, a four-view image of the result and a before/after image: look at it and fix what is wrong before replying. Give a concise label describing the change.',{assetId:string,label:string,script:string}),
+ tool('blender_render','Look closely at a model without changing it. Returns one image. views: a JSON array of up to 6 views, each a name (perspective, front, back, side, left, top, low, rear) or [azimuth, elevation] in degrees (azimuth 0 faces the front, 90 the right side); "" for the standard four. focus: a JSON array of mesh names to frame as a close-up, or "". style: studio (textured, even light), lit (sun and sky, shows materials properly), clay (shape only), wire (topology) or uv (the UV layout drawn over the texture). script: optional Python applied to the throwaway copy first (to preview an idea), or "". reference: the file name of an image the user attached (listed as attachments in the context) to get it back beside your render for comparison, or "".',{assetId:string,views:string,focus:string,style:string,script:string,reference:string}),
+ tool('blender_api','Look up the real Blender Python API of the installed Blender before using a call you are not sure of; APIs change between versions. query is an operator such as "mesh.primitive_cube_add" or "object.bake" (returns its parameters and defaults), a type such as "bpy.types.DecimateModifier" or "ShaderNodeBsdfPrincipled" (returns its properties, or a node\'s sockets), a search word such as "decimate", or "md" for the full reference of the md helper library.',{query:string}),
+ tool('model_create','Create a NEW model in the library from scratch. script is Blender Python run in an EMPTY scene with bpy and the md helper library; build the meshes, UVs and materials. The app saves FBX, BLEND, GLB and textures and returns the new assetId with statistics, findings and a four-view image, exactly like blender_edit. Continue refining it with blender_edit on that assetId.',{name:string,label:string,script:string}),
+ tool('texture_pbr','Make normal and roughness maps from an existing colour texture in the library, so a flat image becomes a full PBR set. strength is the bump strength, "1" to "6" ("" for 2). Returns the two new texture assets with absolute paths.',{textureId:string,strength:string}),
+ tool('model_check','Game-readiness report for a model: triangle count against the project budget, missing UVs, n-gons, non-manifold and loose geometry, unapplied or negative scale, pivot, real-world size, texture sizes and missing textures. Read-only.',{assetId:string}),
+ tool('model_optimize','Apply a ready-made optimisation as a new version. preset is one of: '+Object.entries(PRESETS).map(([id,p])=>id+' ('+p.detail+')').join('; ')+'. targetTriangles is only used by the "target" preset; pass "" otherwise (an empty value with "target" uses the project triangle budget).',{assetId:string,preset:string,targetTriangles:string}),
+ tool('texture_generate','Generate a new texture image with an AI image model and add it to the library as a texture asset. Only your text prompt is sent to the image service. Describe material, colours, wear and style; the project context is added automatically. tileable is "true" for a seamless surface material or "false" for a one-off image such as a sign or decal. Returns the new texture asset and its absolute file path, which you can then load in blender_edit with bpy.data.images.load(path).',{name:string,prompt:string,tileable:string}),
+ tool('scene_list','List the scenes in this project with their objects, lighting and environment.',{}),
+ tool('scene_edit','Create or change a scene. sceneId is an ID from scene_list, or "new" to create one (name is then the new scene\'s name; otherwise pass "" to keep the name). changes is a JSON array of operations applied in order, all or nothing: {"op":"add","assetId":"…","name":"Lamp A","position":[x,y,z],"rotation":[x,y,z],"scale":[x,y,z]} · {"op":"update","itemId":"…","position":[…],"rotation":[…],"scale":[…],"visible":true} · {"op":"remove","itemId":"…"} · {"op":"clear"} · {"op":"lighting","sunIntensity":3,"sunColor":"#ffffff","sunAzimuth":135,"sunElevation":45,"ambientIntensity":1,"ambientColor":"#dfe8ff","shadows":true,"exposure":1} · {"op":"environment","type":"sky|color|gradient|image","color":"#15171b","topColor":"#…","bottomColor":"#…","imageAssetId":"…","turbidity":6,"rayleigh":1.5,"showBackground":true,"ground":"grid|plane|none"} · {"op":"rename","name":"…"}. Units are metres, Y is up, rotations are degrees, models keep their real size at scale 1. Every object is pivoted at the centre of its base, so y=0 rests it on the ground and position is where its footprint is centred. Use each model\'s dimensions from library_list to place objects so they sit on the ground (y=0) and do not overlap. Pass "[]" with sceneId "new" for an empty scene.',{sceneId:string,name:string,changes:string})
 ];
-export async function executeEditTool(library,tool,args,signal,onProgress){
+const API_SCRIPT=String.raw`import bpy, inspect
+query = __QUERY__.strip()
+def describe(rna, limit=60):
+    for prop in list(rna.properties)[:limit]:
+        if prop.identifier == 'rna_type': continue
+        extra = ''
+        if prop.type == 'ENUM': extra = ' one of ' + str([i.identifier for i in prop.enum_items][:24])
+        default = getattr(prop, 'default_array', None) if getattr(prop, 'array_length', 0) else getattr(prop, 'default', None)
+        print(f'  {prop.identifier}: {prop.type.lower()}{extra} = {list(default) if hasattr(default, "__len__") and not isinstance(default, str) else default!r}  # {prop.description[:90]}')
+if query == 'md':
+    print(md.__doc__)
+    for name, fn in inspect.getmembers(md, inspect.isfunction):
+        if not name.startswith('_'): print(f'md.{name}{inspect.signature(fn)}\n    {(fn.__doc__ or "").strip()}')
+else:
+    name = query.replace('bpy.ops.', '').replace('bpy.types.', '')
+    found = False
+    if '.' in name:
+        try:
+            op = eval('bpy.ops.' + name); rna = op.get_rna_type(); print('bpy.ops.' + name + '  # ' + rna.description); describe(rna); found = True
+        except Exception as error: print('Not an operator:', error)
+    kind = getattr(bpy.types, name, None)
+    if kind is not None and not found:
+        found = True; print('bpy.types.' + name + '  # ' + kind.bl_rna.description); describe(kind.bl_rna)
+        if name.startswith('ShaderNode'):
+            tree = bpy.data.materials.new('probe'); tree.use_nodes = True; node = tree.node_tree.nodes.new(name)
+            print('  inputs:', [s.name for s in node.inputs]); print('  outputs:', [s.name for s in node.outputs])
+        for fn in list(kind.bl_rna.functions)[:40]: print('  ' + fn.identifier + '(' + ', '.join(p.identifier for p in fn.parameters if not p.is_output) + ')  # ' + fn.description[:80])
+    if not found:
+        word = name.lower(); print('Operators matching', repr(word) + ':')
+        for group in dir(bpy.ops):
+            for op in dir(getattr(bpy.ops, group)):
+                if word in (group + '.' + op).lower(): print('  bpy.ops.' + group + '.' + op)
+        print('Types matching:', [t for t in dir(bpy.types) if word in t.lower()][:60])
+print('Blender', bpy.app.version_string)
+`;
+const yes=value=>value===true||/^(true|yes|1)$/i.test(String(value||''));
+const dimensions=asset=>asset.versions?.find(v=>v.id===asset.currentVersion)?.metrics?.dimensions;
+/** Blender is Z-up and the viewer is Y-up, so report sizes the way scenes use them: [width, height, depth]. */
+const sceneSize=asset=>{const d=dimensions(asset);return d?[d[0],d[2],d[1]].map(v=>Math.round(v*1000)/1000):undefined;};
+function summary(result){const report=result.report||{},issues=(report.issues||result.issues||[]).filter(i=>i.level!=='info').slice(0,25);return {issues,infoCount:(report.issues||result.issues||[]).filter(i=>i.level==='info').length,printed:(report.output??result.output)||undefined};}
+/**
+ * Runs one agent tool. Returns plain data for the agent; an `image` Buffer, when present, is a PNG the agent should be shown.
+ * extras: {scenes, settings(), importTexture(name,bytes), imageConfig}.
+ */
+export async function executeEditTool(library,tool,args,signal,onProgress,extras={}){
  if(signal?.aborted)throw Error('Operation cancelled.');
  if(!args||typeof args!=='object')throw Error('Invalid tool arguments.');
+ const settings=extras.settings?.()||{},draft=!!settings.reviewEdits&&!extras.direct;
+ const edited=result=>({id:result.id,name:result.name,versionId:result.pending?result.pendingVersion:result.currentVersion,...(result.pending?{status:'PROPOSED, not yet live. The user sees it beside the current model and chooses Accept or Discard. Further edits build on this proposal.'}:{status:'Saved as the current version.'}),before:result.metrics?.before,after:result.metrics&&{meshes:result.metrics.meshes,vertices:result.metrics.vertices,triangles:result.metrics.triangles,dimensions:result.metrics.dimensions,materials:result.metrics.materials},textureCount:result.textureCount,...summary(result),images:[result.image,result.compare].filter(Boolean),imageNote:result.image?'Attached: four views of the result (top row three-quarter and front, bottom row side and top)'+(result.compare?', then a before (left) / after (right) comparison':'')+'. Check them against the request.':'No review image was produced.'});
  switch(tool){
- case 'library_list':{const query=String(args.query||'').toLowerCase();return library.public().filter(a=>(a.name+' '+a.path).toLowerCase().includes(query)).map(a=>({id:a.id,name:a.name,path:a.path,type:a.type,removed:!!a.removed,currentVersion:a.currentVersion||'original',versions:a.versions||[]}));}
+ case 'library_list':{const query=String(args.query||'').toLowerCase();return library.public().filter(a=>(a.name+' '+a.path).toLowerCase().includes(query)).slice(0,400).map(a=>({id:a.id,name:a.name,path:a.path,type:a.type,removed:!!a.removed,...(a.type==='model'?{currentVersion:a.currentVersion||'original',pendingVersion:a.pendingVersion,sizeMetres:sceneSize(a),triangles:a.versions?.find(v=>v.id===a.currentVersion)?.metrics?.triangles,versions:(a.versions||[]).map(v=>({id:v.id,label:v.label,draft:v.draft}))}:{dimensions:a.dimensions})}));}
  case 'asset_rename':return library.rename(args.assetId,args.name,signal);
  case 'asset_remove':return library.remove(args.assetId,signal);
  case 'asset_restore':return library.restore(args.assetId,signal);
  case 'asset_use_version':return library.useVersion(args.assetId,args.versionId,signal);
- case 'blender_edit':return library.edit(args.assetId,args,signal,onProgress);
+ case 'blender_inspect':{const result=await library.inspect(args.assetId,{script:args.script,render:yes(args.render)},signal,onProgress);return {version:result.versionLabel||result.versionId,stats:result.stats,meshes:result.meshes,issues:result.issues,printed:result.output||'',note:'Nothing was saved.',image:result.image||undefined,...(result.renderError?{renderError:result.renderError}:{})};}
+ case 'blender_edit':return edited(await library.edit(args.assetId,{script:args.script,label:args.label,draft},signal,onProgress));
+ case 'blender_render':{const list=(value,label)=>{if(!value)return undefined;let parsed;try{parsed=JSON.parse(value);}catch{parsed=String(value).split(',').map(v=>v.trim()).filter(Boolean);}if(!Array.isArray(parsed))throw Error(label+' must be a JSON array.');return parsed;};const views=list(args.views,'views'),style=['studio','lit','clay','wire','uv'].includes(args.style)?args.style:'studio';const result=await library.inspect(args.assetId,{script:args.script,render:{views,focus:list(args.focus,'focus'),style,tile:views&&views.length<=2?640:448}},signal,onProgress);if(!result.image)throw Error('The render failed: '+(result.renderError||'no image was produced.'));const images=[result.image];let reference;if(args.reference){if(!extras.readCapture)throw Error('Reference images are unavailable here.');images.push(await extras.readCapture(args.reference));reference='The second image is the reference '+args.reference+'.';}return {version:result.versionLabel||result.versionId,style,views:views||['perspective','front','side','top'],stats:result.stats,printed:result.output||undefined,uvsOutsideSquare:result.uvsOutsideSquare,reference,note:'Nothing was saved.',images};}
+ case 'blender_api':{const result=await library.script({script:API_SCRIPT.replace('__QUERY__',JSON.stringify(String(args.query||'').slice(0,200)))},signal,onProgress);return {query:args.query,result:result.output||'No output.'};}
+ case 'model_create':{if(!extras.createModel)throw Error('Creating models is unavailable here.');if(typeof args.script!=='string'||!args.script.trim())throw Error('Supply the Blender script that builds the model.');const result=await extras.createModel({name:args.name,script:args.script,label:args.label},signal,onProgress);return {...edited({...result,pending:false}),assetId:result.id,status:'Created as a new model in the library. Refine it with blender_edit on this assetId.'};}
+ case 'texture_pbr':{if(!extras.importTexture)throw Error('Texture tools are unavailable here.');const source=library.require(args.textureId);if(source.type!=='texture')throw Error('Choose a texture asset. Use library_list for IDs.');const strength=Math.min(8,Math.max(.2,Number(args.strength)||2)),stem=source.name.replace(/[^a-zA-Z0-9_-]+/g,'_').replace(/_?(BaseColor|Albedo|Color|Diffuse)$/i,'').slice(0,70)||'Texture';
+  const result=await library.script({script:'import bpy, os\nfrom pathlib import Path\ncolor, height, normal, rough = md.pbr_from_color('+JSON.stringify(library.file(source))+', normal_strength='+strength+')\nout = Path(job_dir) / "out"; out.mkdir(exist_ok=True)\nfor suffix, data in (("Normal", normal), ("Roughness", rough)):\n    image = md.image_from_array("'+stem+'_" + suffix, data, non_color=True); image.filepath_raw = str(out / ("'+stem+'_" + suffix + ".png")); image.file_format = "PNG"; image.save()\n',collect:async job=>{const files=[];for(const suffix of ['Normal','Roughness'])files.push({name:stem+'_'+suffix+'.png',bytes:await (await import('node:fs/promises')).readFile(path.join(job,'out',stem+'_'+suffix+'.png'))});return files;}},signal,onProgress);
+  const made=[];for(const file of result.files){const {id}=await extras.importTexture(file.name,file.bytes);const asset=library.require(id);made.push({id,name:asset.name,role:/Normal/.test(file.name)?'normal':'roughness',absolutePath:library.file(asset)});}return {source:source.name,textures:made,note:'Connect them with md.assign_texture(material, absolutePath, role).'};}
+ case 'model_check':{const result=await library.inspect(args.assetId,{},signal,onProgress);return {version:result.versionLabel||result.versionId,stats:result.stats,issues:result.issues,project:{engine:settings.engine||undefined,triangleBudget:settings.triangleBudget||undefined}};}
+ case 'model_optimize':{const preset=String(args.preset||'');return edited(await library.edit(args.assetId,{...presetEdit(preset,{targetTriangles:args.targetTriangles||settings.triangleBudget}),draft},signal,onProgress));}
+ case 'texture_generate':{if(!extras.importTexture)throw Error('Texture generation is unavailable here.');onProgress('Generating the texture image');const image=await generateTexture({prompt:args.prompt,tileable:args.tileable===undefined||yes(args.tileable),context:settings.context,config:extras.imageConfig,signal});const stem=String(args.name||'Generated texture').replace(/[^a-zA-Z0-9 _.-]/g,'_').replace(/^[. ]+/,'').slice(0,80)||'Generated_texture';const {id}=await extras.importTexture(stem+image.extension,image.bytes);const asset=library.require(id);return {id,name:asset.name,type:'texture',path:asset.path,absolutePath:library.file(asset),size:image.size,note:'Added to the library. To use it, load this absolutePath in blender_edit and connect it to the material.'};}
+ case 'scene_list':{if(!extras.scenes)throw Error('Scenes are unavailable here.');return extras.scenes.list().map(scene=>({...scene,items:scene.items.map(({id,...item})=>({itemId:id,...item,sizeMetres:sceneSize(library.catalog.get(item.assetId)||{})}))}));}
+ case 'scene_edit':{const scenes=extras.scenes;if(!scenes)throw Error('Scenes are unavailable here.');let changes;try{changes=JSON.parse(args.changes||'[]');}catch{throw Error('changes must be a JSON array of operations.');}if(!Array.isArray(changes))throw Error('changes must be a JSON array of operations.');
+  let scene;if(args.sceneId==='new'){scene=await scenes.create({name:args.name});if(changes.length){try{scene=await scenes.apply(scene.id,changes);}catch(error){await scenes.remove(scene.id);throw error;}}}else{if(args.name)changes=[...changes,{op:'rename',name:args.name}];scene=await scenes.apply(String(args.sceneId||''),changes);}
+  return {sceneId:scene.id,name:scene.name,items:scene.items.map(({id,...item})=>({itemId:id,...item})),lighting:scene.lighting,environment:scene.environment,note:'The user sees this scene update live. Open it from the Scenes tab of the library.'};}
  default:throw Error('Unknown library tool.');
  }
 }

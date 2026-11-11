@@ -1,6 +1,6 @@
 # Meshdesk
 
-A local 3D workspace built with React, Vite, Three.js and a Node/Express server. Codex uses your existing CLI sign-in. Double-click **Start Meshdesk.command**, or run `npm start` and open http://127.0.0.1:8790. `npm run dev` starts development mode.
+A local 3D workspace built with React, Vite, Three.js and a Node/Express server. The chat agent is Codex or Claude, using your existing CLI sign-in for whichever you pick. Double-click **Start Meshdesk.command**, or run `npm start` and open http://127.0.0.1:8790. `npm run dev` starts development mode.
 
 ## Install from GitHub
 
@@ -12,7 +12,7 @@ npm run build
 npm start
 ```
 
-Open http://127.0.0.1:8790. Use **Open project** to open a separate project's `project.meshdesk` file. For AI editing, sign in to the Codex CLI. Optional machine-specific settings go in `config.local.json` (copy `config.example.json`); that file and the local recent-project registry are excluded from Git.
+Open http://127.0.0.1:8790. Use **Open project** to open a separate project's `project.meshdesk` file. For AI editing, sign in to the Codex CLI (`codex login`) or Claude Code (`claude auth login`). Choose the agent, model and reasoning level from the pickers under the chat box; the choice is remembered per agent, and switching agents mid-conversation carries the recent chat history across. Optional machine-specific settings go in `config.local.json` (copy `config.example.json`); that file and the local recent-project registry are excluded from Git.
 
 ## Working with assets
 
@@ -51,11 +51,11 @@ Original files are preserved. Rename affects working files and retains the stabl
 
 ## Local operation
 
-No cloud hosting configuration or API key is needed. AI replies still use the signed-in Codex service over the internet; submitted messages, model context and attached images are sent for inference. These conversations are separate from the desktop chat.
+No cloud hosting configuration or API key is needed. AI replies still use the signed-in Codex or Claude service over the internet (Claude runs through the Claude Agent SDK on your local Claude Code sign-in; API-key environment variables are not forwarded); submitted messages, model context and attached images are sent for inference. These conversations are separate from the desktop chat.
 
-Requires Node 22.12+, signed-in Codex CLI, and Blender at `/Applications/Blender.app/Contents/MacOS/Blender`. Paths can be customized in `config.local.json`. The server binds only to 127.0.0.1 and uses same-origin checks and a per-start write token. Do not expose it publicly.
+Requires Node 22.12+, a signed-in Codex CLI or Claude Code, and Blender at `/Applications/Blender.app/Contents/MacOS/Blender`. Paths can be customized in `config.local.json`. The server binds only to 127.0.0.1 and uses same-origin checks and a per-start write token. Do not expose it publicly.
 
-`npm test` runs persistence, project isolation, captures, attachments, editing and validation tests. `npm run build` builds the viewer. Environment overrides: `PORT`, `ASSET_LIBRARY_PATH`, `ASSET_REVIEW_DATA`, `CODEX_BIN`.
+`npm test` runs persistence, project isolation, captures, attachments, editing and validation tests. `npm run build` builds the viewer. Environment overrides: `PORT`, `ASSET_LIBRARY_PATH`, `ASSET_REVIEW_DATA`, `CODEX_BIN`, `CLAUDE_BIN`.
 
 ## Portable project folders
 
@@ -76,3 +76,19 @@ Use **Open project**, paste the path to `project.meshdesk` (or its containing fo
 **Import a project ZIP as a copy** still supports older Meshdesk ZIP archives and new archives containing `project.meshdesk`. Archive imports get a new identity and independent Codex threads; opening an existing project file keeps its identity and conversation threads. Two existing folders with the same ID are not silently treated as independent projects.
 
 From Terminal, `./Start Meshdesk.command "/full/path/project.meshdesk"` opens that project. Finder double-click file association is not installed; use the app’s Open project control or the launcher command.
+
+## Working with the agent
+
+- **Preview before publish.** With *Project settings → Preview edits before they apply* on (the default), every agent edit is a proposal: it appears beside the current model with a list of changed meshes, and nothing goes live until you press **Accept**. **Discard** deletes it.
+- **Project context.** *Project settings* holds a brief (art style, platform, budgets) that the agent reads with every message, plus the target engine, a per-model triangle budget and the largest allowed texture.
+- **Game-readiness check.** The shield button in the viewport toolbar runs the model through Blender and lists problems (missing UVs, n-gons, loose geometry, scale, pivot, texture sizes, budget). Each finding can be sent to the agent to fix, and *Quick optimise* applies clean-up or triangle reduction directly.
+- **Visual diff.** In compare mode, the diff button tints added, changed and removed meshes and lists what changed.
+- **Scenes.** The *Scenes* tab of the library arranges models with a sun, ambient light, sky or image environment and a ground. Move, rotate and scale with the gizmo (W / E / R), or ask the agent to lay the scene out. Every model is pivoted at the centre of its base.
+- **Engine export presets.** The export dialog has Unity, Unreal and Godot presets (axis, unit scale, file naming) and can write LOD1–LOD3 files beside each model.
+- **AI textures.** Set `imageApiKey` in `config.local.json` (or `OPENAI_API_KEY`) to let the agent generate textures. Only the text prompt is sent to the image service.
+
+How the agent edits: it inspects the model in Blender first (`blender_inspect`, read-only), edits, then receives before/after statistics, readiness findings and a four-view render of the result, and corrects its own work before replying.
+
+## Blender isolation and limits
+
+Blender runs once per edit, with no network and write access only to a throwaway job folder: `sandbox-exec` on macOS, `bubblewrap` on Linux. On other systems set `MESHDESK_UNSANDBOXED_BLENDER=1` to accept running agent-written scripts without isolation. A run is stopped after 10 minutes; change that with `MESHDESK_BLENDER_TIMEOUT` (seconds, 30–3600).

@@ -9,7 +9,7 @@ export function usePanelWidth(){
 }
 export default function PanelResize({width,max,onResize}){
  const drag=useRef(null);
- return <div className="panel-resizer" role="separator" tabIndex={0} aria-label="Resize Codex panel" aria-orientation="vertical" aria-valuemin={300} aria-valuemax={max} aria-valuenow={Math.round(width)} title="Drag to resize · Arrow keys to adjust"
+ return <div className="panel-resizer" role="separator" tabIndex={0} aria-label="Resize chat panel" aria-orientation="vertical" aria-valuemin={300} aria-valuemax={max} aria-valuenow={Math.round(width)} title="Drag to resize · Arrow keys to adjust"
  onPointerDown={e=>{if(e.button!==0)return;e.preventDefault();drag.current={x:e.clientX,width};e.currentTarget.setPointerCapture(e.pointerId);}}
  onPointerMove={e=>{if(drag.current)onResize(drag.current.width+drag.current.x-e.clientX);}}
  onPointerUp={e=>{drag.current=null;e.currentTarget.releasePointerCapture(e.pointerId);}}
