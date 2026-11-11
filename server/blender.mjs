@@ -56,8 +56,8 @@ export async function runBlender({job,source,textures,script,libraryRoot,working
    reject(Error('Blender failed ('+(terminationSignal||code)+'); nothing was saved.\n'+log.slice(-5000)));});
  });
  if(signal?.aborted)throw Error('Edit cancelled.');
- const image=async(name='review.png')=>{try{const bytes=await fs.readFile(path.join(realJob,name));return bytes.length&&bytes.toString('latin1',1,4)==='PNG'?bytes:null;}catch{return null;}};
- if(mode==='scene')return {directory:path.join(realJob,'scene_export')};
+ const image=async(name='review.png')=>{try{const small=await fs.readFile(path.join(realJob,name.replace(/\.png$/,'.jpg')));if(small.length>1000&&small[0]===0xff&&small[1]===0xd8)return small;}catch{}try{const bytes=await fs.readFile(path.join(realJob,name));return bytes.length&&bytes.toString('latin1',1,4)==='PNG'?bytes:null;}catch{return null;}};
+ if(mode==='scene'){let renderError;try{renderError=await fs.readFile(path.join(realJob,'render_error.txt'),'utf8');}catch{}return {directory:path.join(realJob,'scene_export'),image:await image(),renderError};}
  if(mode==='inspect'||mode==='script')return {...JSON.parse(await fs.readFile(path.join(realJob,'inspect.json'),'utf8')),image:await image(),directory:realJob};
  for(const name of ['preview.glb',`Models/${assetId}/model.fbx`,'model.blend','metrics.json','materials.json']){const stat=await fs.lstat(path.join(realJob,name));if(!stat.isFile()||stat.isSymbolicLink()||stat.size===0)throw Error('Blender did not produce a valid '+name);}
  const glb=await fs.readFile(path.join(realJob,'preview.glb'));if(glb.toString('ascii',0,4)!=='glTF'||glb.readUInt32LE(8)!==glb.length)throw Error('Invalid GLB preview.');

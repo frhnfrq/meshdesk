@@ -76,7 +76,14 @@ def load_png(path):
 def save_png(array, path):
     import numpy as np
     h, w = array.shape[:2]; out = bpy.data.images.new('MeshdeskOut', w, h, alpha=True); out.pixels.foreach_set(np.ascontiguousarray(array[::-1], dtype=np.float32).ravel())
-    out.filepath_raw = str(path); out.file_format = 'PNG'; out.save(); bpy.data.images.remove(out)
+    out.filepath_raw = str(path); out.file_format = 'PNG'; out.save()
+    # Large sheets also get a JPEG copy: agents are sent that instead, because very large images are dropped on the way.
+    try:
+        if Path(path).name in ('review.png', 'compare.png') and Path(path).stat().st_size > 400000:
+            flat = bpy.data.images.new('MeshdeskFlat', w, h, alpha=False); flat.pixels.foreach_set(np.ascontiguousarray(array[::-1], dtype=np.float32).ravel())
+            flat.filepath_raw = str(Path(path).with_suffix('.jpg')); flat.file_format = 'JPEG'; flat.save(quality=82); bpy.data.images.remove(flat)
+    except Exception: pass
+    bpy.data.images.remove(out)
 def hstack(paths, target):
     import numpy as np
     save_png(np.concatenate([load_png(p) for p in paths], axis=1), target)
@@ -208,7 +215,19 @@ if mode == 'scene':
         try: sun_data.color = [int(light.get('sunColor', '#ffffff')[i:i + 2], 16) / 255 for i in (1, 3, 5)]
         except Exception: pass
         sun = bpy.data.objects.new('Sun', sun_data); bpy.context.scene.collection.objects.link(sun); sun.location = toward * 20; sun.rotation_euler = (-toward).to_track_quat('-Z', 'Y').to_euler()
-    bpy.context.view_layer.update(); step('Exporting the scene')
+    bpy.context.view_layer.update()
+    if spec.get('render'):
+        # A look at the assembled scene for the agent: the same placements the viewer shows, drawn from a few angles.
+        step('Rendering the scene'); wanted = spec['render']; names = set(wanted.get('focus') or [])
+        def top(o):
+            while o.parent: o = o.parent
+            return o
+        focus = [o.name for o in scene_meshes() if top(o).name in names] if names else None
+        try: render_views(job / 'review.png', wanted.get('views') or ['perspective', 'top', 'front', 'side'], focus, wanted.get('style') or 'studio', int(wanted.get('tile') or 512))
+        except Exception as error: (job / 'render_error.txt').write_text(str(error)[:500])
+    if spec.get('format') == 'none':
+        step('Scene render ready'); sys.stdout.flush(); os._exit(0)
+    step('Exporting the scene')
     stem = spec['stem']
     if spec['format'] == 'fbx':
         bpy.ops.export_scene.fbx(filepath=str(out / (stem + '.fbx')), use_selection=False, object_types={'MESH', 'ARMATURE', 'EMPTY', 'LIGHT'}, path_mode='COPY', embed_textures=True, bake_anim=False)
@@ -232,8 +251,9 @@ textures = {}
 by_stem = {}
 for item in config['textures']:
     item = {'path': item, 'reference': Path(item).name} if isinstance(item, str) else item
-    textures[Path(item['path']).name] = item['path']
-    textures[item.get('reference', Path(item['path']).name)] = item['path']
+    # Earlier entries win: the server lists textures from the model's own folder first.
+    textures.setdefault(Path(item['path']).name, item['path'])
+    textures.setdefault(item.get('reference', Path(item['path']).name), item['path'])
     # A model often names a .tga or .psd whose library copy was converted to another format.
     for name in (Path(item['path']).name, item.get('reference', '')):
         if name: by_stem.setdefault(Path(name).stem.lower(), item['path'])

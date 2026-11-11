@@ -11,7 +11,7 @@ const timeout=(promise,ms,message)=>{let timer;return Promise.race([promise,new 
 
 /**
  * Claude Agent SDK adapter that speaks the same thread/turn protocol as CodexBridge,
- * so Reviews can drive either agent. Uses the local Claude Code sign-in; credentials
+ * so Conversations can drive either agent. Uses the local Claude Code sign-in; credentials
  * stay inside Claude Code and API-key variables are never forwarded.
  */
 export class ClaudeBridge extends EventEmitter {

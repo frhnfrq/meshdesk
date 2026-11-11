@@ -133,8 +133,8 @@ function newItemId() {
   crypto.getRandomValues(bytes);
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
 }
-function modelUrl(base, assetId, asset) {
-  return `${base}/previews/${encodeURIComponent(assetId)}?version=current&revision=${asset?.revision || 0}`;
+function modelUrl(base, assetId, asset, versions = 'current') {
+  return `${base}/previews/${encodeURIComponent(assetId)}?version=${versions === 'original' ? 'original' : 'current'}&revision=${asset?.revision || 0}`;
 }
 function imageUrl(base, assetId) {
   return `${base}/library/${encodeURIComponent(assetId)}`;
@@ -271,11 +271,11 @@ function removeItemObject(e, entry) {
   e.onStatus(entry.id, null);
 }
 
-function syncItems(e, items, catalogById, base) {
+function syncItems(e, items, catalogById, base, versions) {
   const wanted = new Set();
   for (const item of items) {
     wanted.add(item.id);
-    const url = modelUrl(base, item.assetId, catalogById.get(item.assetId));
+    const url = modelUrl(base, item.assetId, catalogById.get(item.assetId), versions);
     let entry = e.items.get(item.id);
     if (entry && entry.url !== url) {
       removeItemObject(e, entry);
@@ -743,7 +743,7 @@ function Section({title, count, open, onToggle, children}) {
 
 /* ───────────────────────── Component ───────────────────────── */
 
-const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onChange, dockPanel = false, panelHost = null, onShowPanel}, ref) {
+const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onChange, dockPanel = false, panelHost = null, onShowPanel, versions = 'current'}, ref) {
   const rootRef = useRef(null);
   const hostRef = useRef(null);
   const engineRef = useRef(null);
@@ -828,13 +828,13 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
     emit({...current, items: [...current.items, copy]});
     setSelectedId(copy.id);
   }
-  function addModel(asset) {
+  function addModel(asset, position = [0, 0, 0]) {
     const current = draftRef.current;
     const item = {
       id: newItemId(),
       assetId: asset.id,
       name: asset.name || 'Object',
-      position: [0, 0, 0],
+      position,
       rotation: [0, 0, 0],
       scale: [1, 1, 1],
       visible: true,
@@ -843,6 +843,31 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
     setSelectedId(item.id);
     setAddOpen(false);
     setQuery('');
+  }
+  /* A model dragged in from the library lands where the pointer meets the ground. */
+  const DRAG_TYPE = 'application/x-meshdesk-model';
+  const [dropActive, setDropActive] = useState(false);
+  function onDragOver(event) {
+    if (![...event.dataTransfer.types].includes(DRAG_TYPE)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    if (!dropActive) setDropActive(true);
+  }
+  function onDrop(event) {
+    setDropActive(false);
+    const asset = catalogById.get(event.dataTransfer.getData(DRAG_TYPE));
+    if (!asset || asset.type !== 'model' || asset.removed) return;
+    event.preventDefault();
+    const e = engineRef.current;
+    let position = [0, 0, 0];
+    if (e && hostRef.current) {
+      const rect = hostRef.current.getBoundingClientRect();
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1), e.camera);
+      const hit = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), new THREE.Vector3());
+      if (hit && hit.length() < 2000) position = [Math.round(hit.x * 100) / 100, 0, Math.round(hit.z * 100) / 100];
+    }
+    addModel(asset, position);
   }
   function dropToGround(id) {
     const item = draftRef.current.items.find(candidate => candidate.id === id);
@@ -1050,7 +1075,7 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
   useEffect(() => {
     const e = engineRef.current;
     if (!e) return;
-    syncItems(e, draft.items, catalogById, base);
+    syncItems(e, draft.items, catalogById, base, versions);
     syncLighting(e, draft.lighting);
     syncEnvironment(e, draft.environment, draft.lighting, base);
     syncGround(e, draft.environment, draft.lighting);
@@ -1065,7 +1090,7 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
     }
     e.transform.setMode(mode);
     if (selectedId && !item) setSelectedId(null);
-  }, [draft, catalogById, base, selectedId, mode]);
+  }, [draft, catalogById, base, selectedId, mode, versions]);
 
   /* ── Imperative API ── */
   useImperativeHandle(ref, () => ({
@@ -1110,7 +1135,7 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
 
   return (
     <div className="scene-root" ref={rootRef} tabIndex={-1}>
-      <div className="scene-viewport">
+      <div className={'scene-viewport' + (dropActive ? ' scene-drop' : '')} onDragOver={onDragOver} onDragLeave={() => setDropActive(false)} onDrop={onDrop}>
         <div className="scene-canvas" ref={hostRef} />
 
         {webglError && <div className="scene-overlay scene-error" role="alert">{webglError}</div>}

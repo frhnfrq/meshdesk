@@ -14,8 +14,8 @@ function setup(){
   return stage={renderer,scene,camera};
 }
 function dispose(root){root.traverse(o=>{if(!o.isMesh)return;o.geometry?.dispose();for(const m of(Array.isArray(o.material)?o.material:[o.material])){for(const value of Object.values(m))if(value?.isTexture)value.dispose();m.dispose();}});}
-async function render(url){
-  const {renderer,scene,camera}=setup(),gltf=await new GLTFLoader().loadAsync(url),root=gltf.scene;
+async function render(url,size=SIZE){
+  const {renderer,scene,camera}=setup();renderer.setSize(size,size,false);const gltf=await new GLTFLoader().loadAsync(url),root=gltf.scene;
   try{
     const bounds=new THREE.Box3().setFromObject(root),sphere=bounds.getBoundingSphere(new THREE.Sphere()),radius=Math.max(sphere.radius,.0001);
     const distance=radius/Math.sin(THREE.MathUtils.degToRad(camera.fov/2))*1.02;
@@ -28,16 +28,16 @@ async function stored(key){try{const cache=await caches.open(STORE),hit=await ca
 async function store(key,blob){try{const cache=await caches.open(STORE);await cache.put(key,new Response(blob,{headers:{'Content-Type':blob.type}}));}catch{}}
 async function work(){
   if(working)return;working=true;
-  while(queue.length){const job=queue.shift();try{job.resolve(await render(job.url));}catch(error){job.reject(error);}await new Promise(resolve=>setTimeout(resolve,0));}
+  while(queue.length){const job=queue.shift();try{job.resolve(await render(job.url,job.size));}catch(error){job.reject(error);}await new Promise(resolve=>setTimeout(resolve,0));}
   working=false;
 }
 
 /** Resolves to an image URL for the model's current look, or rejects when it cannot be drawn. */
-export function modelThumbnail(base,asset){
-  const version=asset.currentVersion||'original',key=`${base}/thumbnails/${asset.id}?version=${encodeURIComponent(version)}&revision=${asset.revision||0}`;
+export function modelThumbnail(base,asset,which='current',size=SIZE){
+  const live=which==='current',version=live?asset.currentVersion||'original':which,key=`${base}/thumbnails/${asset.id}?version=${encodeURIComponent(version)}&revision=${live?asset.revision||0:0}&size=${size}`;
   if(!memory.has(key))memory.set(key,(async()=>{
     let blob=await stored(key);
-    if(!blob){blob=await new Promise((resolve,reject)=>{queue.push({url:`${base}/previews/${asset.id}?version=current&revision=${asset.revision||0}`,resolve,reject});void work();});void store(key,blob);}
+    if(!blob){blob=await new Promise((resolve,reject)=>{queue.push({url:`${base}/previews/${asset.id}?version=${encodeURIComponent(live?'current':version)}&revision=${asset.revision||0}`,size,resolve,reject});void work();});void store(key,blob);}
     return URL.createObjectURL(blob);
   })().catch(error=>{memory.delete(key);throw error;}));
   return memory.get(key);

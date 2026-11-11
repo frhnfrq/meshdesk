@@ -1,0 +1,137 @@
+import {useEffect,useLayoutEffect,useRef,useState} from 'react';
+import Markdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import {Paperclip,Sparkles,X,AtSign,Camera,ArrowUp,ArrowUpRight,Square,ListChecks,Box,RefreshCw,MousePointerClick,SlidersHorizontal,ArrowLeft,Plus,Search,Check,RotateCcw,ChevronRight,Boxes,Grid3x3,Image,Eye,Columns2,History,MessagesSquare,Pencil,GitCommitHorizontal,LayoutDashboard} from 'lucide-react';
+import {imageData} from '../images.js';
+import PanelResize from './PanelResize.jsx';
+import Picker from './Picker.jsx';
+import {AgentLogo} from './AgentLogo.jsx';
+const AGENTS={codex:'Codex',claude:'Claude'};
+const SCENE_SUGGESTIONS=['Lay out a street corner using models from my library','Give this scene warm late-afternoon lighting','Space the objects out so nothing overlaps'];
+const MODEL_SUGGESTIONS=['What should we improve first on this model?','Check the topology and UVs for game-readiness','Restyle this model to match the style guide'];
+const PROJECT_SUGGESTIONS=['Which models are furthest from the style guide?','Find models that are over the triangle budget','Make a new scene with every street prop'];
+const STATES={ready:'Connected',connecting:'Connecting',offline:'Offline','signed-out':'Signed out'};
+const EFFORTS={low:'Low',medium:'Medium',high:'High',xhigh:'Extra high',max:'Max',ultra:'Ultra',minimal:'Minimal',none:'None'};
+const KIND_ICONS={model:Box,scene:Boxes,texture:Grid3x3,reference:Image,board:LayoutDashboard};
+const KIND_NAMES={model:'Model',scene:'Scene',texture:'Texture',reference:'Image',board:'Board'};
+const CHECKPOINT_STATES={live:'Live',version:'Saved version',proposed:'Proposed',checkpoint:'Checkpoint',pruned:'Removed when settled',gone:'Discarded'};
+const markdownComponents={
+ a:({children,href})=>/^https?:\/\//.test(href||'')?<a href={href} target="_blank" rel="noreferrer">{children}</a>:<span>{children}</span>,
+ img:({alt})=><span>{alt}</span>,
+ table:({children})=><div className="markdown-table" tabIndex={0}><table>{children}</table></div>
+};
+/** "now", "5m", "3h", "2d", then a short date. */
+export function ago(iso,now=Date.now()){const s=Math.max(0,(now-Date.parse(iso))/1000);if(!Number.isFinite(s))return '';if(s<60)return 'now';if(s<3600)return Math.floor(s/60)+'m';if(s<86400)return Math.floor(s/3600)+'h';if(s<86400*14)return Math.floor(s/86400)+'d';return new Date(iso).toLocaleDateString([],{day:'numeric',month:'short'});}
+function KindIcon({type,size=12}){const Icon=KIND_ICONS[type]||Box;return <Icon size={size}/>;}
+export default function ConversationPanel({catalog,scenes=[],panel,base='',focus,chat,onChat,drafts={},onDraft,onUpload,selectedPart,onOpen,conversations={},connection,onSend,onCancel,onUpdate,onClose,onRestore,onCheckpoint,capture,previewReady,onReconnect,agentOptions,onAgentChange,sideTab,onSideTab,onInspectorHost}){
+ const all=Object.values(conversations),current=chat.view==='chat'&&chat.id!=='new'?conversations[chat.id]:null,view=chat.view==='chat'&&(chat.id==='new'||current)?'chat':'list',key=view==='chat'?chat.id:'list';
+ const draft=drafts[key]||{},text=draft.text||'',ids=draft.ids||[],setDraft=change=>onDraft(key,{...draft,...change});
+ const [uploading,setUploading]=useState(false),uploadInput=useRef(null),[attach,setAttach]=useState(true),[sending,setSending]=useState(false),[error,setError]=useState('');
+ const [picker,setPicker]=useState(false),[query,setQuery]=useState(''),[mention,setMention]=useState(null),[active,setActive]=useState(0),[search,setSearch]=useState(''),[showSettled,setShowSettled]=useState(false),[showWorking,setShowWorking]=useState(true),[renaming,setRenaming]=useState(null),[,setTick]=useState(0);
+ const scroll=useRef(null),follow=useRef(true),composer=useRef(null);
+ const lookup=id=>{const asset=catalog.find(a=>a.id===id);if(asset)return {id,name:asset.name,type:asset.type,group:asset.group,removed:asset.removed};const scene=scenes.find(s=>s.id===id);return scene?{id,name:scene.name,type:'scene',group:'Scenes'}:null;};
+ const messages=current?.messages||[],busy=!!current?.busy||sending,attached=!!focus&&draft.detached!==focus.id&&!ids.includes(focus.id);
+ const matches=picker?[...scenes.map(s=>({id:s.id,name:s.name,type:'scene',group:'Scenes'})),...catalog.filter(a=>!a.removed&&a.type!=='board').map(a=>({id:a.id,name:a.name,type:a.type,group:a.group||''}))].filter(item=>!ids.includes(item.id)&&!(attached&&item.id===focus.id)&&(item.name+' '+item.group+' '+KIND_NAMES[item.type]).toLowerCase().includes(query.toLowerCase())).sort((a,b)=>(a.type==='model'?0:1)-(b.type==='model'?0:1)).slice(0,60):[];
+ // Opening a conversation shows its latest message at once; only new replies scroll smoothly.
+ const opened=useRef('');
+ useEffect(()=>{follow.current=true;setPicker(false);setMention(null);setError('');setRenaming(null);},[key]);
+ useLayoutEffect(()=>{const el=scroll.current;if(!el||!follow.current)return;const jump=opened.current!==key||!messages.length;opened.current=key;el.scrollTo({top:el.scrollHeight,behavior:jump?'instant':'smooth'});},[key,current,sideTab]);
+ useEffect(()=>{const timer=setInterval(()=>setTick(t=>t+1),60000);return()=>clearInterval(timer);},[]);
+ function changeText(e){const value=e.target.value;setDraft({text:value});const end=e.target.selectionStart;const match=value.slice(0,end).match(/(?:^|\s)@([^@\n]*)$/);if(match&&ids.length<8){setMention({start:end-match[1].length-1,end});setQuery(match[1]);setPicker(true);setActive(0);}else if(mention){setPicker(false);setMention(null);}}
+ function addReference(item){if(ids.length>=8)return;setDraft({ids:[...ids,item.id],...(mention?{text:text.slice(0,mention.start)+'@'+item.name+' '+text.slice(mention.end)}:{})});setPicker(false);setMention(null);setQuery('');composer.current?.focus();}
+ function pickerKey(e){if(e.key==='Escape'){e.preventDefault();setPicker(false);setMention(null);}else if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();setActive(i=>Math.max(0,Math.min(matches.length-1,i+(e.key==='ArrowDown'?1:-1))));}else if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&matches[active]){e.preventDefault();addReference(matches[active]);}}
+ async function submit(event){event?.preventDefault();if(!text.trim()||busy)return;setError('');setSending(true);try{const shot=attached&&attach&&previewReady&&['model','scene'].includes(focus.type)?capture():{};const saved=await onSend(chat.id,{text,requestId:crypto.randomUUID(),refIds:ids,focusId:attached?focus.id:null,attachments:draft.attachments||[],selectedPart:attached&&focus.type==='model'?selectedPart:null,...shot});onDraft(key,null);if(chat.id==='new')onChat({view:'chat',id:saved.id});setPicker(false);setMention(null);follow.current=true;}catch(e){setError(e.message);}finally{setSending(false);}}
+ async function upload(files){setUploading(true);try{const list=[...(draft.attachments||[])];for(const file of [...files]){if(list.length>=4)throw Error('Attach up to four screenshots.');const image=await imageData(file);list.push(await onUpload({name:file.name,image}));}setDraft({attachments:list});}catch(e){setError(e.message);}finally{setUploading(false);}}
+ const act=work=>Promise.resolve().then(work).catch(e=>setError(e.message));
+ const ready=connection.state==='ready',provider=connection.provider||'codex',agentName=connection.label||AGENTS[provider];
+ const providers=agentOptions?.providers||[{id:provider,label:agentName,models:[]}],chosen=providers.find(p=>p.id===provider)||providers[0],models=(chosen.models||[]).filter(m=>m.id!=='default');
+ const model=connection.model||'',effort=connection.effort||'',activeModel=(chosen.models||[]).find(m=>m.id===model)||(chosen.models||[]).find(m=>m.id==='default'||m.isDefault)||(chosen.models||[])[0];
+ const modelOptions=[{value:'',label:'Default model'},...models.map(m=>({value:m.id,label:m.label,detail:m.detail})),...(model&&!models.some(m=>m.id===model)?[{value:model,label:model}]:[])];
+ const efforts=activeModel?.efforts||[],effortOptions=[{value:'',label:'Auto'},...efforts.map(e=>({value:e,label:EFFORTS[e]||e})),...(effort&&!efforts.includes(effort)?[{value:effort,label:EFFORTS[effort]||effort}]:[])];
+ const changeAgent=change=>act(()=>onAgentChange(change));
+ function changeModel(value){const next=(chosen.models||[]).find(m=>m.id===value);changeAgent({model:value,...(effort&&next&&!next.efforts.includes(effort)?{effort:''}:{})});}
+ const live=message=>['pending','streaming'].includes(message.status),nameOf=message=>AGENTS[message.agent?.provider]||'Codex';
+ // Inbox: finished conversations newest first, the ones still working pinned at the bottom, settled ones folded away.
+ const found=all.filter(c=>!search||(c.title+' '+c.touched.map(id=>lookup(id)?.name||'').join(' ')).toLowerCase().includes(search.toLowerCase())).sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt)),working=found.filter(c=>c.busy),settled=found.filter(c=>!c.busy&&c.settled),inbox=found.filter(c=>!c.busy&&!c.settled),anyBusy=all.some(c=>c.busy);
+ const row=c=>{const last=c.messages.findLast(m=>m.role==='assistant'),names=c.touched.map(id=>lookup(id)).filter(Boolean),failed=last?.status==='error';return <button type="button" key={c.id} className={'inbox-row'+(c.busy?' working':'')+(c.settled?' settled':'')} onClick={()=>onChat({view:'chat',id:c.id})}>
+   <span className="inbox-row-top"><span className="inbox-about">{names.length?<><KindIcon type={names[0].type} size={11}/>{names[0].name}{names.length>1&&<em>+{names.length-1}</em>}</>:<><MessagesSquare size={11}/>Project</>}</span>{c.busy?<span className="inbox-progress shimmer">{c.progress||'Working…'}</span>:<time>{ago(c.updatedAt)}</time>}</span>
+   <strong>{c.title}</strong>
+   <span className="inbox-row-bottom"><span className="inbox-preview">{failed?<span className="inbox-failed">{last.error||'Reply failed'}</span>:(last?.text||c.messages.at(-2)?.text||'').replace(/[#*_`>|-]+/g,' ').replace(/\s+/g,' ').slice(0,90)}</span>{last?.checkpoints?.some(k=>k.proposed&&catalog.find(a=>a.id===k.assetId)?.pendingVersion===k.versionId)&&<span className="inbox-flag" title="A proposed change is waiting for you">Review</span>}<span className={'agent-avatar tiny '+(c.provider||'codex')} aria-hidden="true"><AgentLogo provider={c.provider||'codex'} size={10}/></span></span>
+  </button>;};
+ const suggestions=!focus?PROJECT_SUGGESTIONS:focus.type==='scene'?SCENE_SUGGESTIONS:focus.type==='model'?MODEL_SUGGESTIONS:PROJECT_SUGGESTIONS;
+ return <aside onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();if(view==='chat'&&e.dataTransfer.files.length)upload(e.dataTransfer.files);}} className={'conversation-panel'+(sideTab==='inspector'?' show-inspector':'')+(view==='list'?' inbox-view':'')} aria-label="Conversations panel">
+  <PanelResize width={panel.width} max={panel.max} onResize={panel.update}/>
+  <header className="chat-heading">
+   {sideTab?<div className="side-tabs" role="tablist" aria-label="Side panel"><button type="button" role="tab" aria-selected={sideTab==='inspector'} className={sideTab==='inspector'?'active':''} onClick={()=>onSideTab('inspector')}><SlidersHorizontal size={13}/>Inspector</button><button type="button" role="tab" aria-selected={sideTab==='chat'} className={sideTab==='chat'?'active':''} onClick={()=>onSideTab('chat')}><MessagesSquare size={13}/>Conversations{anyBusy&&<i className="pulse"/>}</button></div>:<><span className={'agent-avatar '+provider} aria-hidden="true"><AgentLogo provider={provider} size={16}/></span>
+   <div className="chat-title"><strong>Conversations</strong><span>{all.length?all.length+(all.length===1?' conversation':' conversations')+(working.length?' · '+working.length+' working':''):'Ask '+agentName+' about anything in this project'}</span></div></>}
+   <span hidden={sideTab==='inspector'} className={'status-pill '+(sideTab?'compact ':'')+connection.state} title={agentName+' connection: '+connection.state}><i/>{STATES[connection.state]||'Disconnected'}</span>
+   <button type="button" className="tool-icon" data-tip="Close panel" data-tip-align="end" onClick={onClose} aria-label="Close side panel"><X size={16}/></button>
+  </header>
+  {sideTab&&<div className="inspector-host" ref={onInspectorHost} hidden={sideTab!=='inspector'}/>}
+  {view==='list'?<div className="inbox">
+   <div className="inbox-tools"><div className="search-wrap"><Search size={14}/><input type="search" aria-label="Search conversations" placeholder="Search conversations" value={search} onChange={e=>setSearch(e.target.value)}/></div><button type="button" className="primary-button" onClick={()=>onChat({view:'chat',id:'new'})}><Plus size={14}/>New</button></div>
+   <div className="inbox-list" aria-label="Conversations">
+    {inbox.map(row)}
+    {!found.length&&<div className="inbox-empty"><span className={'agent-avatar large '+provider} aria-hidden="true"><AgentLogo provider={provider} size={28}/></span><h3>{search?'No matching conversations':'No conversations yet'}</h3>{!search&&<p>A conversation can be about any model, texture or scene, or the whole project. Start one and reference what you need with <kbd>@</kbd>.</p>}{!search&&<button type="button" className="ghost-button" onClick={()=>onChat({view:'chat',id:'new'})}><Plus size={14}/>New conversation</button>}</div>}
+    {!!found.length&&!inbox.length&&<p className="inbox-note">Nothing waiting for you.</p>}
+   </div>
+   <div className="inbox-groups">
+    {!!working.length&&<section className="inbox-group"><button type="button" className="inbox-group-heading" aria-expanded={showWorking} onClick={()=>setShowWorking(!showWorking)}><span>Working</span><em>{working.length}</em><ChevronRight size={13}/></button>{showWorking&&working.map(row)}</section>}
+    {!!settled.length&&<section className="inbox-group"><button type="button" className="inbox-group-heading" aria-expanded={showSettled} onClick={()=>setShowSettled(!showSettled)}><span>Settled</span><em>{settled.length}</em><ChevronRight size={13}/></button>{showSettled&&<div className="inbox-settled">{settled.map(row)}</div>}</section>}
+   </div>
+  </div>:<>
+  <div className="chat-subheading">
+   <button type="button" className="tool-icon" data-tip="All conversations" data-tip-align="start" aria-label="Back to conversations" onClick={()=>onChat({view:'list',id:null})}><ArrowLeft size={15}/></button>
+   {renaming!==null?<form className="chat-rename" onSubmit={e=>{e.preventDefault();const title=renaming.trim();setRenaming(null);if(title&&title!==current.title)act(()=>onUpdate(current.id,{title}));}}><input autoFocus aria-label="Conversation name" maxLength={120} onFocus={e=>e.target.select()} value={renaming} onChange={e=>setRenaming(e.target.value)} onBlur={e=>e.target.form.requestSubmit()} onKeyDown={e=>{if(e.key==='Escape'){e.preventDefault();setRenaming(null);}}}/></form>:<button type="button" className="chat-name" disabled={!current} title={current?'Rename conversation':undefined} onClick={()=>setRenaming(current.title)}><strong>{current?.title||'New conversation'}</strong>{current&&<Pencil size={11}/>}</button>}
+   {current&&<button type="button" className={'settle-button'+(current.settled?' settled':'')} disabled={current.busy} data-tip={current.settled?'Move back to the inbox':'Done with this. Removes its unused checkpoints.'} data-tip-align="end" onClick={()=>act(async()=>{await onUpdate(current.id,{settled:!current.settled});if(!current.settled)onChat({view:'list',id:null});})}>{current.settled?<><RotateCcw size={12}/>Reopen</>:<><Check size={12}/>Settle</>}</button>}
+  </div>
+  <div className="conversation" ref={scroll} onScroll={()=>{const el=scroll.current;follow.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}} aria-label="Conversation">
+   {!messages.length&&<div className="chat-empty">
+    <span className={'agent-avatar large '+provider} aria-hidden="true"><AgentLogo provider={provider} size={28}/></span>
+    <h3>A second pair of eyes</h3>
+    <p>{focus?<>This conversation starts with <b>{focus.name}</b>, which is open in the preview.</>:'Ask about the project, or open something in the preview to talk about it.'} Type <kbd>@</kbd> to reference any model, texture, image or scene.</p>
+    <div className="suggestions">{suggestions.map(suggestion=><button type="button" className="suggestion" key={suggestion} onClick={()=>{setDraft({text:suggestion});composer.current?.focus();}}>{suggestion}<ArrowUpRight size={14}/></button>)}</div>
+   </div>}
+   {messages.map(message=>{const about=message.focus&&(lookup(message.focus.id)||message.focus);return <article key={message.id} className={'message '+message.role+(live(message)?' live':'')}>
+    <div className="message-author">{message.role==='assistant'&&<span className={'agent-avatar small '+(message.agent?.provider||'codex')} aria-hidden="true"><AgentLogo provider={message.agent?.provider||'codex'} size={12}/></span>}<strong>{message.role==='user'?'You':nameOf(message)}</strong><time>{new Date(message.createdAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}</time></div>
+    {message.capture&&<button type="button" className="capture-card" onClick={()=>{if(message.focus)onOpen(message.focus.id);onRestore(message.view,message.focus?.id);}} title="Open this item at this camera angle"><img src={base+'/captures/'+message.capture} alt="View attached to this message"/><span><Camera size={12}/>View attached<em>Restore angle</em></span></button>}
+    {(about?.name||!!message.references?.length)&&<div className="reference-chips saved">{about?.name&&<button type="button" className="focus-chip" title="Was open in the preview" onClick={()=>onOpen(about.id)}><KindIcon type={about.type}/>{about.name}<ArrowUpRight size={12}/></button>}{(message.references||[]).map(item=><button key={item.id} type="button" title={item.path} onClick={()=>onOpen(item.id)}><KindIcon type={item.type||'model'}/>{lookup(item.id)?.name||item.name}<ArrowUpRight size={12}/></button>)}</div>}
+    {!!message.attachments?.length&&<div className="uploaded-images">{message.attachments.map(a=><a href={base+'/captures/'+a.name} target="_blank" rel="noreferrer" key={a.name}><img src={base+'/captures/'+a.name} alt={a.label}/></a>)}</div>}
+    {message.selectedPart&&<div className="part-chip"><MousePointerClick size={12}/>{message.selectedPart.meshName} · {message.selectedPart.materialName}</div>}
+    {!!message.steps?.length&&<details className="activity" open={live(message)}><summary><ListChecks size={13}/>{message.steps.length} {message.steps.length===1?'step':'steps'}</summary><div className="steps">{message.steps.map((s,i)=><div key={i} className={'step '+s.status}><i/>{s.label}</div>)}</div></details>}
+    {!!message.updates?.length&&<details className="activity updates" open={live(message)}><summary><Sparkles size={13}/>{nameOf(message)} notes</summary><div className="steps">{message.updates.map((u,i)=><Markdown key={i} remarkPlugins={[remarkGfm]} components={markdownComponents}>{u}</Markdown>)}</div></details>}
+    {!!message.checkpoints?.length&&<div className="checkpoints" aria-label="Checkpoints">{message.checkpoints.map((c,i)=>{const asset=catalog.find(a=>a.id===c.assetId),version=asset?.versions?.find(v=>v.id===c.versionId),state=c.pruned?'pruned':!version?'gone':asset.pendingVersion===version.id?'proposed':asset.currentVersion===version.id?'live':version.checkpoint||version.draft?'checkpoint':'version';return <div className={'checkpoint '+state} key={c.versionId+i}>
+      <GitCommitHorizontal size={14}/><div className="checkpoint-text"><b title={c.label}>{version&&!version.checkpoint&&!version.draft?version.label:c.label}</b><small>{asset?.name||c.name||'Model'}{c.triangles?' · '+c.triangles.toLocaleString()+' triangles':''} · <span className="checkpoint-state">{CHECKPOINT_STATES[state]}</span></small></div>
+      {version&&<div className="checkpoint-actions"><button type="button" data-tip="Preview" data-tip-side="top" aria-label={'Preview '+c.label} onClick={()=>onCheckpoint('preview',c)}><Eye size={13}/></button>{state!=='live'&&<button type="button" data-tip="Compare with the live model" data-tip-side="top" aria-label={'Compare '+c.label+' with the live model'} onClick={()=>onCheckpoint('compare',c)}><Columns2 size={13}/></button>}{!['live','proposed'].includes(state)&&!version.draft&&<button type="button" data-tip="Restore as the live model" data-tip-side="top" data-tip-align="end" aria-label={'Restore '+c.label} onClick={()=>act(()=>onCheckpoint('restore',c))}><History size={13}/></button>}</div>}
+     </div>;})}</div>}
+    {message.text&&<div className="message-body">{message.role==='assistant'?<Markdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{message.text}</Markdown>:<div className="user-text">{message.text}</div>}</div>}
+    {live(message)&&<div className="reply-progress"><span className="shimmer">{current.progress||'Thinking…'}</span></div>}
+    {message.status==='interrupted'&&<div className="reply-note">Reply stopped. You can send a follow-up.</div>}
+    {message.error&&<div className="reply-error">{message.error}</div>}
+   </article>;})}
+  </div>
+  <form className="composer" onSubmit={submit}>
+   {error&&<div className="form-error" role="alert">{error}</div>}
+   {!ready&&<div className="connection-message"><span>{connection.state==='connecting'?'Connecting to your '+agentName+' sign-in…':connection.state==='offline'?'Local server disconnected. Reconnecting…':connection.state==='signed-out'?<>{agentName} is signed out. Run <code>{provider==='claude'?'claude auth login':'codex login'}</code> in Terminal.</>:agentName+' is disconnected.'}</span>{!['connecting','offline'].includes(connection.state)&&<button type="button" onClick={()=>act(onReconnect)}><RefreshCw size={12}/>Reconnect</button>}</div>}
+   {picker&&<div className="model-mention-picker" role="dialog" aria-label="Reference something"><div className="mention-heading"><strong>Reference a model, texture, image or scene</strong><button type="button" className="tool-icon" aria-label="Close reference picker" onClick={()=>{setPicker(false);setMention(null);}}><X size={14}/></button></div><input autoFocus={!mention} type="search" aria-label="Search the library to reference" placeholder="Search by name, folder or type…" value={query} onChange={e=>{setQuery(e.target.value);setActive(0);}} onKeyDown={pickerKey}/><div className="mention-results" role="listbox" aria-label="Matching items">{matches.map((item,index)=><button type="button" role="option" aria-selected={index===active} key={item.id} onClick={()=>addReference(item)}><KindIcon type={item.type} size={14}/><span><strong>{item.name}</strong><small>{KIND_NAMES[item.type]}{item.group&&item.type!=='scene'?' · '+item.group.replaceAll('/',' / '):''}</small></span></button>)}{!matches.length&&<p>Nothing matches.</p>}</div></div>}
+   <div className="composer-box">
+    {(attached||!!ids.length||!!draft.attachments?.length)&&<div className="composer-context">
+     {!!draft.attachments?.length&&<div className="pending-images">{draft.attachments.map(a=><div key={a.name}><img src={base+'/captures/'+a.name} alt={a.label}/><button type="button" aria-label={'Remove '+a.label} onClick={()=>setDraft({attachments:draft.attachments.filter(t=>t.name!==a.name)})}><X size={10}/></button></div>)}</div>}
+     <div className="reference-chips">{attached&&<button type="button" className="focus-chip" title="Open in the preview. Click to leave it out of this message." aria-label={'Remove '+focus.name+' from this message'} onClick={()=>setDraft({detached:focus.id})}><KindIcon type={focus.type}/>{focus.name}<X size={11}/></button>}{attached&&focus.type==='model'&&selectedPart&&<span className="part-chip"><MousePointerClick size={12}/>{selectedPart.materialName||selectedPart.meshName}</span>}{ids.map(id=>{const item=lookup(id);return <button key={id} type="button" aria-label={'Remove reference '+item?.name} onClick={()=>setDraft({ids:ids.filter(i=>i!==id)})}><KindIcon type={item?.type}/>{item?.name||'Removed item'}<X size={11}/></button>;})}</div>
+    </div>}
+    <input hidden ref={uploadInput} type="file" multiple accept="image/png,image/jpeg,image/webp" onChange={e=>{upload(e.target.files);e.target.value='';}}/>
+    <textarea rows={1} onPaste={e=>{const images=[...e.clipboardData.files].filter(f=>f.type.startsWith('image/'));if(images.length){e.preventDefault();upload(images);}}} ref={composer} aria-label="Message" placeholder={'Ask '+agentName+(attached?' about '+focus.name:'')+'…'} value={text} maxLength={12000} onChange={changeText} onKeyDown={e=>{if(picker){pickerKey(e);if(e.defaultPrevented)return;}if(e.key==='Enter'&&(e.metaKey||e.ctrlKey)){e.preventDefault();submit();}}}/>
+    <div className="composer-actions">
+     <div className="attachment-actions">
+      <button className="tool-icon" type="button" data-tip="Attach screenshots" data-tip-side="top" data-tip-align="start" aria-label="Upload screenshots" disabled={uploading} onClick={()=>uploadInput.current.click()}><Paperclip size={15}/></button>
+      <button className="tool-icon" type="button" data-tip="Reference a model, texture or scene" data-tip-side="top" aria-label="Reference something from the library" disabled={ids.length>=8} aria-expanded={picker} onClick={()=>{setPicker(!picker);setMention(null);setQuery('');setActive(0);}}><AtSign size={15}/></button>
+      {focus&&!attached&&!ids.includes(focus.id)&&<button type="button" className="attach-toggle" title={'Attach '+focus.name+', which is open in the preview'} onClick={()=>setDraft({detached:null})}><Plus size={12}/>{focus.name}</button>}
+      {attached&&['model','scene'].includes(focus.type)&&<label className="attach-toggle" title="Send a screenshot of the current view with your message"><input type="checkbox" checked={attach} onChange={e=>setAttach(e.target.checked)}/><Camera size={13}/>Current view</label>}
+     </div>
+     <div className="send-actions"><kbd className="composer-hint">⌘↵</kbd>{busy?<button type="button" className="stop-button" aria-label="Stop reply" data-tip="Stop" data-tip-side="top" data-tip-align="end" disabled={!current} onClick={()=>act(()=>onCancel(current.id))}><Square size={11} fill="currentColor"/></button>:<button className="send-button" type="submit" aria-label="Send message" disabled={uploading||!text.trim()||(attached&&attach&&focus.type==='model'&&!previewReady)||connection.state==='offline'}><ArrowUp size={16} strokeWidth={2.4}/></button>}</div>
+    </div>
+   </div>
+   <div className="agent-settings" role="group" aria-label="Agent settings" data-provider={provider}><Picker className="ghost" id="agent-provider" label="Agent" options={providers.map(p=>({value:p.id,label:p.label}))} value={provider} onChange={value=>changeAgent({provider:value})}/><Picker className="ghost" id="agent-model" label="Model" options={modelOptions} value={model} onChange={changeModel}/><Picker className="ghost" id="agent-effort" label="Reasoning level" options={effortOptions} value={effort} onChange={value=>changeAgent({effort:value})}/></div>
+  </form></>}
+ </aside>;
+}
