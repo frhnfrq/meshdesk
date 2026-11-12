@@ -40,6 +40,24 @@ const MODES = [
   {value: 'scale', label: 'Scale', key: 'R', Icon: Scale3d},
 ];
 const AXES = ['X', 'Y', 'Z'];
+const BLOCK_DEFAULTS = {length: 100, width: 20, lanes: 3, laneWidth: 3, theme: '', difficulty: ''};
+const ROLE_OPTIONS = [
+  {value: '', label: 'None'},
+  {value: 'obstacle', label: 'Obstacle'},
+  {value: 'pickup', label: 'Pickup'},
+  {value: 'decoration', label: 'Decor'},
+  {value: 'ground', label: 'Ground'},
+];
+const DIFFICULTY_OPTIONS = [
+  {value: '', label: 'Unset'},
+  {value: 'easy', label: 'Easy'},
+  {value: 'medium', label: 'Medium'},
+  {value: 'hard', label: 'Hard'},
+];
+/* Lane centres across a block, left to right, as z positions in metres. */
+function laneCentres(block) {
+  return Array.from({length: block.lanes}, (_, i) => round((i - (block.lanes - 1) / 2) * block.laneWidth, 3));
+}
 
 function toNumber(value, fallback) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
@@ -123,6 +141,7 @@ function normaliseScene(source) {
   return {
     ...input,
     items,
+    ...(input.kind === 'block' ? {block: {...BLOCK_DEFAULTS, ...(input.block || {})}} : {}),
     lighting: normaliseLighting(input.lighting),
     environment: normaliseEnvironment(input.environment),
   };
@@ -296,7 +315,55 @@ function sceneBounds(e, box) {
   for (const entry of e.items.values()) {
     if (entry.ready && entry.holder.visible) box.expandByObject(entry.holder);
   }
+  if (e.blockBox) box.union(e.blockBox);
   return box;
+}
+
+/*
+ * Draws a block's footprint on the ground: the outline, one line per lane, a green arrow where the
+ * track enters and a red one where it leaves. Rebuilt only when the block's size changes.
+ */
+function syncBlock(e, block) {
+  const key = block ? [block.length, block.width, block.lanes, block.laneWidth].join(':') : '';
+  if (e.blockKey === key) return;
+  const first = e.blockKey === undefined;
+  e.blockKey = key;
+  if (e.blockGuide) {
+    e.scene.remove(e.blockGuide);
+    e.blockGuide.traverse(node => {
+      node.geometry?.dispose();
+      node.material?.dispose();
+    });
+    e.blockGuide = null;
+  }
+  e.blockBox = null;
+  if (!block) return;
+  const group = new THREE.Group();
+  const segments = (points, color, opacity = 1) => {
+    const geometry = new THREE.BufferGeometry().setFromPoints(points.map(([x, z]) => new THREE.Vector3(x, 0.02, z)));
+    group.add(new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({color, transparent: opacity < 1, opacity, toneMapped: false})));
+  };
+  const length = block.length;
+  const half = block.width / 2;
+  // A dark floor over the footprint, so the block reads against any sky, with a cross line every 10 m.
+  const floorGeometry = new THREE.PlaneGeometry(length, block.width);
+  floorGeometry.rotateX(-Math.PI / 2);
+  const floor = new THREE.Mesh(floorGeometry, new THREE.MeshBasicMaterial({color: 0x14171c, transparent: true, opacity: 0.55, depthWrite: false, toneMapped: false}));
+  floor.position.set(length / 2, 0.005, 0);
+  group.add(floor);
+  const ticks = [];
+  for (let x = 10; x < length; x += 10) ticks.push([x, -half], [x, half]);
+  if (ticks.length) segments(ticks, 0xffffff, 0.12);
+  segments([[0, -half], [length, -half], [length, -half], [length, half], [length, half], [0, half], [0, half], [0, -half]], 0xf3b46a);
+  segments(laneCentres(block).flatMap(z => [[0, z], [length, z]]), 0x8ab4ff, 0.5);
+  const a = Math.max(1, Math.min(3, half * 0.5));
+  segments([[-a * 1.6, 0], [0, 0], [-a * 0.7, -a * 0.5], [0, 0], [-a * 0.7, a * 0.5], [0, 0]], 0x5fd08c);
+  segments([[length, 0], [length + a * 1.6, 0], [length + a * 0.9, -a * 0.5], [length + a * 1.6, 0], [length + a * 0.9, a * 0.5], [length + a * 1.6, 0]], 0xf2716b);
+  e.scene.add(group);
+  e.blockGuide = group;
+  e.blockBox = new THREE.Box3(new THREE.Vector3(0, 0, -half), new THREE.Vector3(length, 0.1, half));
+  // An empty block has nothing else to frame, so show the whole footprint.
+  if (first && e.items.size === 0) fitCamera(e);
 }
 
 /* Positions the sun and sizes its shadow camera to the current scene bounds. */
@@ -616,6 +683,7 @@ function destroyEngine(e) {
   e.sun.dispose();
   e.hemisphere.dispose();
   e.renderer.dispose();
+  e.renderer.forceContextLoss();
   e.renderer.domElement.remove();
 }
 
@@ -728,7 +796,8 @@ function Segmented({label, options, value, onChange}) {
   );
 }
 
-function Section({title, count, open, onToggle, children}) {
+function Section({title, count, open, onToggle, hidden, children}) {
+  if (hidden) return null;
   return (
     <section className="scene-section">
       <button type="button" className="scene-section-head" aria-expanded={open} onClick={onToggle}>
@@ -743,7 +812,7 @@ function Section({title, count, open, onToggle, children}) {
 
 /* ───────────────────────── Component ───────────────────────── */
 
-const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onChange, dockPanel = false, panelHost = null, onShowPanel, versions = 'current'}, ref) {
+const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onChange, onOpenModel, dockPanel = false, panelHost = null, onShowPanel, versions = 'current'}, ref) {
   const rootRef = useRef(null);
   const hostRef = useRef(null);
   const engineRef = useRef(null);
@@ -763,7 +832,7 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
 
   const [mode, setMode] = useState('translate');
   const [panelOpen, setPanelOpen] = useState(true);
-  const [sections, setSections] = useState({objects: true, lighting: true, environment: true});
+  const [sections, setSections] = useState({block: true, objects: true, lighting: true, environment: true});
   const [addOpen, setAddOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [uniformScale, setUniformScale] = useState(true);
@@ -895,6 +964,10 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
       next[index] = value;
     }
     updateItem(id, {[field]: next});
+  }
+  function setBlock(patch) {
+    const current = draftRef.current;
+    emit({...current, block: {...current.block, ...patch}});
   }
   function setLighting(patch) {
     const current = draftRef.current;
@@ -1079,6 +1152,8 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
     syncLighting(e, draft.lighting);
     syncEnvironment(e, draft.environment, draft.lighting, base);
     syncGround(e, draft.environment, draft.lighting);
+    syncBlock(e, draft.kind === 'block' ? draft.block : null);
+    if (draft.kind === 'block') e.grid.visible = false; // the footprint has its own floor and lines
 
     const item = draft.items.find(candidate => candidate.id === selectedId);
     const entry = item ? e.items.get(item.id) : null;
@@ -1124,6 +1199,12 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
 
   /* ── Render ── */
   const {items, lighting, environment} = draft;
+  const isBlock = draft.kind === 'block';
+  const block = isBlock ? draft.block : null;
+  const lanes = block ? laneCentres(block) : [];
+  const outside = block
+    ? items.filter(item => item.visible && (item.position[0] < -0.01 || item.position[0] > block.length + 0.01 || Math.abs(item.position[2]) > block.width / 2 + 0.01))
+    : [];
   const selected = items.find(item => item.id === selectedId) || null;
   const shownTransform = selected && live?.id === selected.id ? live : selected;
   const loadingCount = items.filter(item => statuses[item.id] === 'loading').length;
@@ -1143,8 +1224,8 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
         {!webglError && items.length === 0 && (
           <div className="scene-empty">
             <Boxes size={26} strokeWidth={1.5} />
-            <strong>This scene is empty</strong>
-            <p>Add a model from the library, or ask the agent to build the scene for you.</p>
+            <strong>{isBlock ? 'This block is empty' : 'This scene is empty'}</strong>
+            <p>{isBlock ? 'Add models from the library and place them inside the outlined footprint, or ask the agent to lay the block out.' : 'Add a model from the library, or ask the agent to build the scene for you.'}</p>
             <button type="button" onClick={openAdd}><Plus size={14} />Add model</button>
           </div>
         )}
@@ -1192,6 +1273,30 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
       {(() => {
         const panel = (
         <aside className="scene-panel" aria-label="Scene settings">
+          <Section title="Block" hidden={!isBlock} open={sections.block} onToggle={() => toggleSection('block')}>
+            {isBlock && (
+              <>
+                <div className="scene-block-grid">
+                  <label>Length<span><NumberField label="Block length in metres" value={block.length} step={1} min={1} max={2000} onCommit={value => setBlock({length: value})} /><em>m</em></span></label>
+                  <label>Width<span><NumberField label="Block width in metres" value={block.width} step={1} min={1} max={500} onCommit={value => setBlock({width: value})} /><em>m</em></span></label>
+                  <label>Lanes<span><NumberField label="Number of lanes" value={block.lanes} step={1} min={1} max={9} onCommit={value => setBlock({lanes: Math.round(value)})} /></span></label>
+                  <label>Lane width<span><NumberField label="Lane width in metres" value={block.laneWidth} step={0.5} min={0.5} max={50} onCommit={value => setBlock({laneWidth: value})} /><em>m</em></span></label>
+                </div>
+                <label className="scene-row scene-block-theme">
+                  <span className="scene-row-label">Theme</span>
+                  <input type="text" aria-label="Block theme" maxLength={60} placeholder="village, station…" value={block.theme} onChange={event => setBlock({theme: event.target.value})} />
+                </label>
+                <Segmented label="Difficulty" options={DIFFICULTY_OPTIONS} value={block.difficulty} onChange={value => setBlock({difficulty: value})} />
+                <p className="scene-hint">The track enters at the green arrow (x = 0) and leaves at the red one (x = {round(block.length, 2)}). Blue lines are the lane centres.</p>
+                {outside.length > 0 && (
+                  <p className="scene-hint scene-hint-error">
+                    Outside the footprint: {outside.slice(0, 4).map(item => item.name).join(', ')}{outside.length > 4 ? ` and ${outside.length - 4} more` : ''}.
+                  </p>
+                )}
+              </>
+            )}
+          </Section>
+
           <Section title="Objects" count={items.length} open={sections.objects} onToggle={() => toggleSection('objects')}>
             {items.length > 0 && (
               <ul className="scene-items">
@@ -1286,7 +1391,30 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
                     {uniformScale ? <Link2 size={13} /> : <Unlink2 size={13} />}
                   </button>
                 </VectorRow>
+                {isBlock && (
+                  <>
+                    <div className="scene-vector-label"><span>Role in the game</span></div>
+                    <Segmented label="Role" options={ROLE_OPTIONS} value={selected.role || ''} onChange={value => updateItem(selected.id, {role: value})} />
+                    <div className="scene-vector-label"><span>Snap to lane</span></div>
+                    <div className="scene-lanes">
+                      {lanes.map((z, index) => (
+                        <button
+                          type="button"
+                          key={index}
+                          aria-label={`Move to lane ${index + 1}`}
+                          aria-pressed={Math.abs(shownTransform.position[2] - z) < 0.01}
+                          onClick={() => setAxis(selected.id, 'position', 2, z)}
+                        >
+                          {index + 1}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
                 <div className="scene-actions">
+                  {onOpenModel && catalogById.has(selected.assetId) && (
+                    <button type="button" title="Open this model on its own, to review or restyle it" onClick={() => onOpenModel(selected.assetId)}><Box size={13} />Open model</button>
+                  )}
                   <button type="button" onClick={() => duplicateItem(selected.id)}><Copy size={13} />Duplicate</button>
                   <button type="button" disabled={statuses[selected.id] !== 'ready'} onClick={() => dropToGround(selected.id)}>
                     <ArrowDownToLine size={13} />Drop to ground
@@ -1297,7 +1425,7 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
             {!selected && items.length > 0 && <p className="scene-hint">Select an object to edit its position, rotation and scale.</p>}
           </Section>
 
-          <Section title="Lighting" open={sections.lighting} onToggle={() => toggleSection('lighting')}>
+          <Section title="Lighting" hidden={isBlock} open={sections.lighting} onToggle={() => toggleSection('lighting')}>
             <div className="scene-subhead">Sun</div>
             <SliderRow label="Intensity" value={lighting.sunIntensity} min={0} max={10} step={0.1} onChange={value => setLighting({sunIntensity: value})} />
             <ColorRow label="Colour" value={lighting.sunColor} onChange={value => setLighting({sunColor: value})} />
@@ -1311,7 +1439,7 @@ const SceneView = forwardRef(function SceneView({base = '', scene, catalog, onCh
             <SliderRow label="Exposure" value={lighting.exposure} min={0.1} max={3} step={0.05} onChange={value => setLighting({exposure: value})} />
           </Section>
 
-          <Section title="Environment" open={sections.environment} onToggle={() => toggleSection('environment')}>
+          <Section title="Environment" hidden={isBlock} open={sections.environment} onToggle={() => toggleSection('environment')}>
             <Segmented label="Environment type" options={ENVIRONMENT_TYPES} value={environment.type} onChange={value => setEnvironment({type: value})} />
 
             {environment.type === 'sky' && (

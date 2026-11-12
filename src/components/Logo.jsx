@@ -1,0 +1,2 @@
+// The Meshdesk mark: a folded prism. Drawn on a 48-unit grid so it fills the .brand-mark tile at any size.
+export default function Logo({size=24}){return <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true" focusable="false"><polygon points="24,10 24,38 9,29" fill="#2A1206"/><polygon points="24,10 39,29 24,38" fill="#2A1206" opacity=".5"/><polygon points="9,29 24,38 24,41 9,32" fill="#FFF3E6" opacity=".75"/><polygon points="39,29 39,32 24,41 24,38" fill="#FFF3E6" opacity=".45"/></svg>;}

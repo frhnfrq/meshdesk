@@ -72,7 +72,7 @@ export function evaluate(measured,{settings={},stats={},sharedCount=0}={}){const
 export class Consistency{
  constructor({file,library,catalog,settings,materials,broadcast=()=>{}}){Object.assign(this,{file,library,catalog,settings,materials,broadcast});this.cache={};this.job=null;}
  async init(){try{this.cache=JSON.parse(await fs.readFile(this.file,'utf8'))||{};}catch(error){if(error.code!=='ENOENT'&&!(error instanceof SyntaxError))throw error;}}
- rules(){const s=this.settings()||{};return {settings:s,key:createHash('sha256').update(JSON.stringify([s.style,s.triangleBudget,s.maxTextureSize,(this.materials?.items||[]).length>0])).digest('hex').slice(0,16)};}
+ rules(){const s=this.settings()||{};return {settings:s,key:createHash('sha256').update(JSON.stringify([(s.style?.palette||[]).map(c=>c.color),s.style?.texelDensity||0,s.triangleBudget,s.maxTextureSize,(this.materials?.items||[]).length>0])).digest('hex').slice(0,16)};}
  fresh(asset,key=this.rules().key){const hit=this.cache[asset.id];return hit&&hit.versionId===(asset.currentVersion||'original')&&hit.rules===key?hit:null;}
  async save(){await fs.writeFile(this.file+'.tmp',JSON.stringify(this.cache));await fs.rename(this.file+'.tmp',this.file);}
  /** Measures one model's live version in Blender and judges it. */

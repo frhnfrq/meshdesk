@@ -113,3 +113,14 @@ label.scene-row{grid-template-columns:minmax(0,1fr) auto;cursor:pointer}
 @media (max-width:720px){
   .scene-panel{position:absolute;top:0;right:0;bottom:0;z-index:7;box-shadow:var(--shadow-pop)}
 }
+
+/* Blocks: footprint settings, roles and lane snapping */
+.scene-block-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.scene-block-grid label{display:grid;gap:4px;color:var(--muted);font-size:11.5px}
+.scene-block-grid label span{display:flex;align-items:center;gap:6px}
+.scene-block-grid .scene-num{flex:1;min-width:0;width:100%;text-align:left}
+.scene-block-grid em{font-style:normal;color:var(--faint);font-size:11.5px}
+.scene-block-theme input{grid-column:2/-1;min-width:0;height:26px;padding:0 8px;border:1px solid var(--line-strong);border-radius:var(--r-xs);background:var(--surface-1);color:var(--text);font-size:12px}
+.scene-lanes{display:flex;gap:4px;flex-wrap:wrap}
+.scene-lanes button{min-width:30px;height:26px;padding:0 8px;border:1px solid var(--line-strong);border-radius:var(--r-xs);background:var(--surface-1);color:var(--text-2);font:12px var(--mono)}
+.scene-lanes button[aria-pressed=true]{border-color:var(--accent-line);background:var(--accent-soft);color:var(--accent)}
