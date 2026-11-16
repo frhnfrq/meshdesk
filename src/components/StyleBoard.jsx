@@ -40,10 +40,12 @@ export default function StyleBoard({base,settings,catalog,request,onSave,onError
  latest.current=draft;texture.current=maxTexture;
  const incomingKey=JSON.stringify(settings?.style||null);
  // A change made elsewhere (an applied proposal, a restored version) replaces what is on screen; our own saves coming back do not.
- useEffect(()=>{if(incomingKey===ownKey.current||saving.current||saveTimer.current)return;ownKey.current=incomingKey;setDraft(normalise(settings?.style));setMaxTexture(settings?.maxTextureSize||'');},[incomingKey]);
+ useEffect(()=>{if(incomingKey===ownKey.current||saving.current||saveTimer.current)return;ownKey.current=incomingKey;setDraft(normalise(settings?.style));setMaxTexture(settings?.maxTextureSize||'');clearTimeout(shotTimer.current);shotTimer.current=setTimeout(snapshot,1500);},[incomingKey]);
  async function saveNow(){clearTimeout(saveTimer.current);saveTimer.current=null;saving.current=true;setSaveState('Saving…');try{const value=await onSave({style:outgoing(latest.current),maxTextureSize:texture.current});ownKey.current=JSON.stringify(value.style||null);setSaveState('Saved');clearTimeout(shotTimer.current);shotTimer.current=setTimeout(snapshot,1500);}catch(e){setSaveState('Not saved');onError(e.message);}finally{saving.current=false;}}
  async function snapshot(){try{const image=await drawBoard(latest.current.board.items,base);if(image)await request(base+'/api/style/snapshot',{image});}catch{/* The picture is a convenience for agents; the guide itself is already saved. */}}
  function change(next){setDraft(old=>{const value=typeof next==='function'?next(old):{...old,...next};latest.current=value;return value;});setSaveState('Saving…');clearTimeout(saveTimer.current);saveTimer.current=setTimeout(saveNow,600);}
+ // An agent may have changed the board while this page was closed, which drops the saved picture of it; draw a fresh one.
+ useEffect(()=>{const timer=setTimeout(snapshot,2000);return()=>clearTimeout(timer);},[]);
  // Leaving the page with a save still queued sends it at once.
  useEffect(()=>()=>{if(saveTimer.current){clearTimeout(saveTimer.current);void onSave({style:outgoing(latest.current),maxTextureSize:texture.current}).catch(()=>{});}clearTimeout(shotTimer.current);},[]);
  const items=draft.board.items,setItems=fn=>change(old=>({...old,board:{items:fn(old.board.items)}}));

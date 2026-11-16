@@ -1266,3 +1266,11 @@ div.asset:focus-visible{box-shadow:inset 0 0 0 1px var(--accent-line)}
 #list:not(.grid) .asset.picked+.asset.picked{border-top-left-radius:0;border-top-right-radius:0}
 #list:not(.grid) .asset.picked:has(+.asset.picked){border-bottom-left-radius:0;border-bottom-right-radius:0}
 #list.grid .asset.picked{box-shadow:inset 0 0 0 1px var(--accent-line)}
+
+/* Pictures an agent shows in its reply */
+.agent-images{display:flex;flex-wrap:wrap;gap:8px}
+.agent-images>*{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:4px;height:auto;border-radius:0;width:calc(50% - 4px);min-width:0;padding:0;border:0;background:transparent;color:var(--text-3);font-size:11px;line-height:14px;text-align:left;text-decoration:none;cursor:pointer}
+.agent-images>:only-child{width:100%}
+.agent-images img{display:block;width:100%;max-height:260px;object-fit:contain;border-radius:var(--r-md);border:1px solid var(--line-strong);background:var(--surface-2);transition:border-color var(--fast)}
+.agent-images>:hover img{border-color:var(--accent-line)}
+.agent-images span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

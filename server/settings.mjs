@@ -8,7 +8,9 @@ const plain=(value,max)=>String(value??'').replace(/[\x00-\x1f]/g,' ').trim().sl
 const itemId=value=>/^[a-z0-9-]{1,40}$/.test(String(value||''))?String(value):null;
 const within=(value,min,max,fallback)=>{const n=Number(value);return Number.isFinite(n)?Math.min(max,Math.max(min,Math.round(n*10)/10)):fallback;};
 const hexColour=value=>{const color=String(value||'').toLowerCase();if(!/^#[0-9a-f]{6}$/.test(color))throw Error('Palette colours must be hex values such as #c8553d.');return color;};
-export const SETTING_DEFAULTS={context:'',reviewEdits:true,engine:'',triangleBudget:0,maxTextureSize:4096,style:STYLE_DEFAULTS};
+/** What agents may do on the internet: nothing, their own built-in web search, or also drive a real browser (shown in a window or kept in the background). */
+export const WEB_ACCESS=['off','search','browser'],BROWSER_WINDOWS=['visible','background'];
+export const SETTING_DEFAULTS={webAccess:'off',browserWindow:'visible',context:'',reviewEdits:true,engine:'',triangleBudget:0,maxTextureSize:4096,style:STYLE_DEFAULTS};
 const prose=(value,label)=>{if(typeof value!=='string'||value.length>4000)throw Error('Keep the '+label+' under 4,000 characters.');return value;};
 /** The project's art direction in a form both people and agents can check work against. */
 export function cleanStyle(input={},base=STYLE_DEFAULTS){
@@ -45,8 +47,37 @@ export function applyStyleChanges(style,changes={}){
  for(const edit of list('editRules')){const text=plain(edit?.to,240);if(!text)throw Error('An edited rule needs new text in "to".');next.rules[find(edit.from)].text=text;}
  for(const text of list('addRules')){const clean=plain(text,240);if(!clean)throw Error('A new rule cannot be empty.');let id='rule-'+(next.rules.length+1);while(next.rules.some(r=>r.id===id))id+='x';next.rules.push({id,text:clean,on:true});}
  if(changes.texelDensity!==undefined)next.texelDensity=whole(changes.texelDensity,8192);
- if(!['removeColors','addColors','removeRules','editRules','addRules'].some(key=>list(key).length)&&changes.texelDensity===undefined)throw Error('The proposal changes nothing. Use addColors, removeColors, addRules, editRules, removeRules or texelDensity.');
+ if(list('removeBoardItems').length||list('moveBoardItems').length){
+  const items=(style.board?.items||[]).map(item=>({...item})),names=changes.boardNames||{},at=target=>{const index=items.findIndex(i=>same(i.id,target)||same(i.assetId,target)||same(i.name,target)||same(names[i.assetId],target)||(i.kind==='note'&&same(i.text,target)));if(index<0)throw Error('No moodboard item matches "'+target+'". Use an id from moodboardItems.');return index;};
+  for(const target of list('removeBoardItems'))items.splice(at(target),1);
+  for(const move of list('moveBoardItems')){const item=items[at(move?.item)];for(const key of ['x','y','w'])if(move[key]!==undefined){const n=Number(move[key]);if(!Number.isFinite(n))throw Error('Moodboard positions must be numbers.');item[key]=n;}}
+  next.board={items};
+ }
+ if(!['removeColors','addColors','removeRules','editRules','addRules','removeBoardItems','moveBoardItems'].some(key=>list(key).length)&&changes.texelDensity===undefined)throw Error('The proposal changes nothing. Use addColors, removeColors, addRules, editRules, removeRules, texelDensity, removeBoardItems or moveBoardItems.');
  return cleanStyle({...next,materialRules:'',notes:''},style);
+}
+/**
+ * Puts new items on the moodboard and returns {style, added}. Items without a position are laid out in three columns in the
+ * free space to the right of what is already there, so nothing lands on top of the user's own arrangement.
+ * sizes maps an asset id to its [width, height] in pixels, used to work out how tall each picture is on the board.
+ */
+export function addBoardItems(style,incoming,sizes={}){
+ if(!Array.isArray(incoming)||!incoming.length)throw Error('Give at least one item to add.');
+ const existing=style.board?style.board.items.map(item=>({...item})):(style.references||[]).map((assetId,i)=>({id:'item-'+(i+1),kind:'image',assetId,x:(i%3)*304,y:Math.floor(i/3)*304,w:280}));
+ if(existing.length+incoming.length>80)throw Error('The moodboard holds up to 80 items; it has '+existing.length+'.');
+ const tall=item=>{if(item.kind==='swatch')return 30;if(item.kind==='note')return 20+18*Math.max(1,Math.ceil(String(item.text||'').length*7.2/Math.max(40,item.w-24)));const d=sizes[item.assetId];return d?.[0]>0&&d[1]>0?item.w*d[1]/d[0]:item.w;};
+ const gap=24,width=280,left=existing.length?Math.max(...existing.map(i=>i.x+(i.kind==='swatch'?140:i.w)))+gap*2:0,top=existing.length?Math.min(...existing.map(i=>i.y)):0,columns=[top,top,top],taken=new Set(existing.map(i=>i.id)),added=[];
+ let counter=existing.length;
+ for(const raw of incoming){
+  if(!raw||typeof raw!=='object')throw Error('Each moodboard item must be an object.');
+  const item={...raw,w:raw.w===undefined?(raw.kind==='swatch'?140:width):Number(raw.w)};if(!Number.isFinite(item.w))throw Error('Moodboard sizes must be numbers.');
+  let id;do{id='item-'+(++counter);}while(taken.has(id));taken.add(id);item.id=id;
+  if(raw.x===undefined||raw.y===undefined){const column=columns.indexOf(Math.min(...columns));item.x=left+column*(width+gap);item.y=columns[column];columns[column]+=tall(item)+gap;}
+  else{item.x=Number(raw.x);item.y=Number(raw.y);if(!Number.isFinite(item.x)||!Number.isFinite(item.y))throw Error('Moodboard positions must be numbers.');}
+  added.push(item);
+ }
+ const next=cleanStyle({board:{items:[...existing,...added]}},style),ids=new Set(added.map(i=>i.id));
+ return {style:next,added:next.board.items.filter(i=>ids.has(i.id))};
 }
 /** The style guide as a few plain sentences, for texture prompts. */
 export function styleBrief(settings={}){const style=settings.style;if(!styleIsSet(style))return '';return [style.palette.length?'Use only this colour palette: '+style.palette.map(c=>(c.name?c.name+' ':'')+c.color).join(', ')+'.':'',activeRules(style).length?'Style rules: '+activeRules(style).join(' '):''].filter(Boolean).join(' ').slice(0,2500);}
@@ -55,6 +86,8 @@ export function cleanSettings(input={},base=SETTING_DEFAULTS){
  if(input.style!==undefined)value.style=cleanStyle(input.style,value.style);
  if(input.context!==undefined){if(typeof input.context!=='string'||input.context.length>8000)throw Error('Keep the project context under 8,000 characters.');value.context=input.context;}
  if(input.reviewEdits!==undefined)value.reviewEdits=!!input.reviewEdits;
+ if(input.webAccess!==undefined){if(!WEB_ACCESS.includes(input.webAccess))throw Error('Web access must be off, search or browser.');value.webAccess=input.webAccess;}
+ if(input.browserWindow!==undefined){if(!BROWSER_WINDOWS.includes(input.browserWindow))throw Error('The browser window must be visible or background.');value.browserWindow=input.browserWindow;}
  if(input.engine!==undefined){if(!ENGINES.includes(input.engine))throw Error('Choose Unity, Unreal, Godot or no engine.');value.engine=input.engine;}
  if(input.triangleBudget!==undefined)value.triangleBudget=whole(input.triangleBudget,20000000);
  if(input.maxTextureSize!==undefined)value.maxTextureSize=whole(input.maxTextureSize,16384)||SETTING_DEFAULTS.maxTextureSize;

@@ -4,7 +4,7 @@ import {randomUUID} from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-const READ_TOOLS=['Read','Glob','Grep'];
+const READ_TOOLS=['Read','Glob','Grep'],WEB_TOOLS=['WebSearch','WebFetch'];
 const SERVER='meshdesk';
 const sdk=()=>import('@anthropic-ai/claude-agent-sdk');
 const timeout=(promise,ms,message)=>{let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(message)),ms);})]).finally(()=>clearTimeout(timer));};
@@ -75,10 +75,11 @@ export class ClaudeBridge extends EventEmitter {
     const attempt=async resume=>{
       const {query}=await sdk();let release;const done=new Promise(resolve=>{release=resolve;});
       const prompt=(async function*(){yield {type:'user',message:{role:'user',content},parent_tool_use_id:null};await done;})();
-      const q=query({prompt,options:{...this.base(),cwd,abortController:turn.controller,systemPrompt:thread.instructions,tools:READ_TOOLS,includePartialMessages:true,permissionMode:'default',
+      const q=query({prompt,options:{...this.base(),cwd,abortController:turn.controller,systemPrompt:thread.instructions,tools:this.webSearch?[...READ_TOOLS,...WEB_TOOLS]:READ_TOOLS,includePartialMessages:true,permissionMode:'default',
         ...(model?{model}:{}),...(effort?{effort}:{}),...(resume?{resume:threadId}:{sessionId:threadId}),...(server?{mcpServers:{[SERVER]:server}}:{}),
         canUseTool:async(name,toolInput)=>{
           if(name.startsWith('mcp__'+SERVER+'__'))return {behavior:'allow',updatedInput:toolInput};
+          if(this.webSearch&&WEB_TOOLS.includes(name))return {behavior:'allow',updatedInput:toolInput};
           if(READ_TOOLS.includes(name)&&this.allowedPath(toolInput.file_path??toolInput.path,cwd))return {behavior:'allow',updatedInput:toolInput};
           return {behavior:'deny',message:'Meshdesk only allows reading files inside the asset library and using its library tools.'};
         }}});
