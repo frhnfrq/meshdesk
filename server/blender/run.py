@@ -88,7 +88,7 @@ def hstack(paths, target):
     import numpy as np
     save_png(np.concatenate([load_png(p) for p in paths], axis=1), target)
 
-def render_views(target, views=None, focus=None, style='studio', tile=384):
+def render_views(target, views=None, focus=None, style='studio', tile=384, band=None, overlay=None):
     """Renders the model into one image. views: names from VIEWS or [azimuth, elevation] pairs in degrees
     (azimuth 0 looks at the front, 90 at the right side). focus: mesh names to frame.
     style: studio (textured, flat light), lit (sun and sky), clay, wire."""
@@ -99,6 +99,18 @@ def render_views(target, views=None, focus=None, style='studio', tile=384):
     views = list(views or ['perspective', 'front', 'side', 'top'])[:6]
     scene = bpy.context.scene; render = scene.render
     low, high = bounds(framed); center = Vector([(low[i] + high[i]) / 2 for i in range(3)]); radius = max((Vector(high) - Vector(low)).length / 2, 1e-4)
+    if band:
+        # A horizontal slice of the model's height (0 = feet, 1 = top), for close-ups such as a face on a single-mesh character.
+        bpy.context.view_layer.update(); deps = bpy.context.evaluated_depsgraph_get(); z0 = low[2] + (high[2] - low[2]) * min(band); z1 = low[2] + (high[2] - low[2]) * max(band); pts = []
+        for o in framed:
+            e = o.evaluated_get(deps); n = len(e.data.vertices)
+            if not n: continue
+            co = np.empty(n * 3, np.float32); e.data.vertices.foreach_get('co', co); co = co.reshape(n, 3) @ np.array(e.matrix_world.to_3x3(), np.float32).T + np.array(e.matrix_world.translation, np.float32)
+            pts.append(co[(co[:, 2] >= z0) & (co[:, 2] <= z1)])
+        pts = np.concatenate(pts) if pts else np.zeros((0, 3), np.float32)
+        if len(pts):
+            low, high = pts.min(axis=0).tolist(), pts.max(axis=0).tolist(); low[2], high[2] = z0, z1
+            center = Vector([(low[i] + high[i]) / 2 for i in range(3)]); radius = max((Vector(high) - Vector(low)).length / 2, 1e-4)
     data = bpy.data.cameras.new('MeshdeskReview'); camera = bpy.data.objects.new('MeshdeskReview', data); scene.collection.objects.link(camera)
     data.type = 'ORTHO'; data.ortho_scale = radius * 2.15; data.clip_start = radius / 100; data.clip_end = radius * 40
     world = bpy.data.worlds.new('MeshdeskReview'); world.color = (.16, .17, .19); extra = []
@@ -140,6 +152,27 @@ def render_views(target, views=None, focus=None, style='studio', tile=384):
             d = Vector((math.sin(az) * math.cos(el), -math.cos(az) * math.cos(el), math.sin(el))).normalized()
             camera.location = center + d * radius * 6; camera.rotation_euler = (-d).to_track_quat('-Z', 'Y').to_euler()
             render.filepath = str(job / 'tmp' / f'view_{index}.png'); bpy.ops.render.render(write_still=True); tiles.append(load_png(render.filepath))
+        if overlay:
+            # Reference check: each view becomes a row of render | reference scaled to the model's silhouette | the two blended.
+            rows = []
+            for index, view in enumerate(views):
+                shot = tiles[index]; spec = overlay.get(view if isinstance(view, str) else str(index)) if isinstance(overlay, dict) else None
+                if not spec: continue
+                try:
+                    ref, ref_mask, (c0, r0, c1, r1) = md.subject_box(str(spec['path']), spec.get('box')); _, (x0, y0, x1, y1) = md._subject(shot[..., :3], None, .04)
+                    scale = (y1 - y0) / max(r1 - r0, 1); width = max(2, int(round((c1 - c0) * scale))); height = y1 - y0
+                    piece = md._resize(ref[r0:r1, c0:c1], width, height); mask = md._resize(ref_mask[r0:r1, c0:c1, None].astype(np.float32), width, height)
+                    canvas = shot[..., :3].copy(); canvas[:] = shot[0, 0, :3]; alpha = np.zeros(shot.shape[:2] + (1,), np.float32); feet = lambda m: (lambda cols: (cols[0] + cols[-1]) / 2 if len(cols) else None)(np.where(m[int(len(m) * .9):].any(axis=0))[0])
+                    _m, _ = md._subject(shot[..., :3], None, .04); fa = feet(_m[y0:y1, x0:x1]); fb = feet(mask[..., 0] > .5)
+                    left = int(round(x0 + fa - fb)) if fa is not None and fb is not None else int(round((x0 + x1) / 2 - width / 2))
+                    a0 = max(0, left); a1 = min(shot.shape[1], left + width)
+                    if a1 > a0: canvas[y0:y1, a0:a1] = piece[:, a0 - left:a1 - left]; alpha[y0:y1, a0:a1] = mask[:, a0 - left:a1 - left]
+                    canvas = canvas * alpha + shot[0, 0, :3] * (1 - alpha); blend = shot[..., :3] * .5 + canvas * .5
+                    edge = np.abs(np.diff(alpha[..., 0], axis=0, prepend=0)) + np.abs(np.diff(alpha[..., 0], axis=1, prepend=0)) > .3; blend[edge] = (1, .2, .1)
+                    one = np.ones(shot.shape[:2] + (1,), np.float32); rows.append(np.concatenate([np.dstack([shot[..., :3], one]), np.dstack([canvas, one]), np.dstack([blend, one])], axis=1))
+                except Exception as error: print('Reference overlay skipped for', view, '-', error)
+            if rows:
+                save_png(np.concatenate(rows, axis=0), target); return True
         columns = 1 if len(tiles) == 1 else 2 if len(tiles) <= 4 else 3
         while len(tiles) % columns: tiles.append(np.full_like(tiles[0], .1))
         save_png(np.concatenate([np.concatenate(tiles[i:i + columns], axis=1) for i in range(0, len(tiles), columns)], axis=0), target)
@@ -241,7 +274,8 @@ if source is None: pass
 elif source.suffix.lower() == '.blend':
     bpy.ops.wm.open_mainfile(filepath=str(source), load_ui=False, use_scripts=False)
 elif source.suffix.lower() in ['.glb', '.gltf']:
-    bpy.ops.import_scene.gltf(filepath=str(source))
+    try: bpy.ops.import_scene.gltf(filepath=str(source), disable_bone_shape=True)
+    except TypeError: bpy.ops.import_scene.gltf(filepath=str(source))
 elif source.suffix.lower() == '.obj':
     bpy.ops.wm.obj_import(filepath=str(source))
 else:
@@ -314,13 +348,13 @@ meshes = scene_meshes()
 stats = scene_stats()
 if mode in ('inspect', 'script'):
     # Read-only: report on the scene (after the script, whose changes are thrown away) and stop.
-    result = {'stats': stats, 'before': before, 'meshes': mesh_table(), 'issues': readiness(missing), 'output': captured.getvalue()[-12000:], 'missingTextures': sorted(set(missing))}
+    result = {'stats': stats, 'before': before, 'meshes': mesh_table(), 'issues': readiness(missing), 'output': captured.getvalue()[-30000:], 'missingTextures': sorted(set(missing))}
     spec = config.get('render')
     if spec:
         step('Rendering review views'); spec = spec if isinstance(spec, dict) else {}
         try:
             if spec.get('style') == 'uv': result['uvsOutsideSquare'] = uv_layout(job / 'review.png', spec.get('focus')); result['render'] = True
-            else: result['render'] = render_views(job / 'review.png', views=spec.get('views'), focus=spec.get('focus'), style=spec.get('style') or 'studio', tile=int(spec.get('tile') or 384))
+            else: result['render'] = render_views(job / 'review.png', views=spec.get('views'), focus=spec.get('focus'), style=spec.get('style') or 'studio', tile=int(spec.get('tile') or 384), band=spec.get('band'), overlay=spec.get('overlay'))
         except Exception as error: result['renderError'] = str(error)[:300]
     (job / 'inspect.json').write_text(json.dumps(result))
     step('Inspection complete')
