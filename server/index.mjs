@@ -20,6 +20,9 @@ import {Batches} from './batches.mjs';
 import {SharedMaterials} from './materials.mjs';
 import {Consistency} from './consistency.mjs';
 import {Handoff} from './handoff.mjs';
+import {Generators,Generations} from './generators.mjs';
+import {LocalModels} from './local-models.mjs';
+import {Sharing} from './sharing.mjs';
 import {imageConfig} from './textures.mjs';
 import {presetEdit,presetList} from './presets.mjs';
 import {resolveLibraryFile,sameLocalOrigin} from './validation.mjs';
@@ -33,7 +36,17 @@ import {executeEditTool} from './edit-tools.mjs';
 import {validateMessage} from './validation.mjs';
 const projects=new Projects(dataRoot,process.env.ASSET_LIBRARY_PATH||config.assetLibraryPath,config.projectsDirectory);await projects.init();
 const agentSettings=new AgentSettings(path.join(dataRoot,'agent.json'));await agentSettings.init();
+const generators=new Generators(path.join(dataRoot,'generators.json'));await generators.init();
 const runtimes=new Map();
+const tellAll=event=>{for(const pending of runtimes.values())void pending.then(r=>r.broadcast(event)).catch(()=>{});};
+/** Local models Meshdesk installs and runs itself. Installing one switches the local route on and points it at that model. */
+// The models folder: the environment wins, then the folder chosen in the app (used from the next start), then config.local.json.
+const localModels=new LocalModels({root:process.env.MESHDESK_MODELS_DIR||generators.value.modelsDirectory||config.modelsDirectory||path.join(dataRoot,'local-models'),olderRoots:[path.join(dataRoot,'local-models'),config.modelsDirectory].filter(Boolean),onChange:()=>void localModels.public().then(value=>tellAll({type:'localModels',localModels:value})).catch(()=>{})});await localModels.init();generators.local=localModels;localModels.token=()=>generators.hfToken();
+const shareGenerators=()=>{const value=generators.public();tellAll({type:'generators',generators:value});return value;};
+/** Sharing this computer's local model with other Meshdesks on the network, and finding theirs. Off until switched on. */
+const sharing=new Sharing({generators,localModels,onChange:()=>void sharing.public().then(value=>tellAll({type:'sharing',sharing:value})).catch(()=>{})});await sharing.apply();
+localModels.onInstalled=id=>void generators.update({providers:{local:{enabled:true,managed:id}}}).then(shareGenerators).catch(()=>{});
+localModels.onRemoved=id=>{if(generators.value.providers.local.managed===id)void generators.update({providers:{local:{managed:localModels.installed.values().next().value||''}}}).then(shareGenerators).catch(()=>{});};
 const browserProfiles=path.join(dataRoot,'browser-profiles');
 async function runtime(id){if(runtimes.has(id))return runtimes.get(id);const pending=projects.resolve(id).then(buildRuntime);runtimes.set(id,pending);try{return await pending;}catch(e){runtimes.delete(id);throw e;}}
 /** First start after versions and checkpoints were separated: collapse old iteration lists and show the steps in the chat that made them. */
@@ -75,7 +88,32 @@ async function buildRuntime(project){
  const handoff=new Handoff({file:path.join(dataRoot,'handoffs.json'),project,library,catalog,scenes,exporter,settings:()=>settings.get(),exportScene:exportSceneFiles});await handoff.init();
  const publicSettings=()=>({...settings.get(),styleVersions:settings.versions(),textureGeneration:!!images.apiKey,presets:presetList()});
  Object.assign(result,{browser,exporter,router,library,conversations,bridge,store,clients,catalog,assetRoot,dataRoot,broadcast,scenes,settings});
- app.get('/api/bootstrap',async(req,res)=>res.json({catalog:library.public(),token,connection:bridge.status(),libraryName:project.name,project,base:'/p/'+project.id,scenes:scenes.list(),batches:batches.list(),materials:materials.list(),settings:publicSettings(),workspace:await readJson(path.join(dataRoot,'workspace.json'),{})}));
+ /** Image-to-3D jobs for this project. The routes and their keys are shared by every project. */
+ const generations=new Generations({generators,importModel:(name,bytes)=>importAsset(result,{name,folder:'Generated',data:Buffer.from(bytes).toString('base64')}),readImage:async id=>{const asset=library.require(id);if(!['reference','texture'].includes(asset.type)||asset.removed)throw Error('Choose a picture that is in the library.');return fs.readFile(library.file(asset));},broadcast,budget:()=>settings.get().triangleBudget||0,file:path.join(dataRoot,'generations.json')});await generations.init();conversations.extras.generations=generations;result.generations=generations;
+ app.get('/api/generators',(req,res)=>res.json(generators.public()));
+ app.post('/api/generators',(req,res)=>reply(res,async()=>{await generators.update(req.body);return shareGenerators();}));
+ app.get('/api/sharing',(req,res)=>reply(res,()=>sharing.public()));
+ app.post('/api/sharing',(req,res)=>reply(res,()=>sharing.update(req.body)));
+ app.post('/api/sharing/discover',(req,res)=>reply(res,()=>sharing.discover()));
+ app.post('/api/sharing/connect',(req,res)=>reply(res,async()=>{const result=await generators.pair({url:String(req.body.url||''),code:String(req.body.code||'')});return {...result,generators:shareGenerators()};}));
+ app.post('/api/sharing/refresh',(req,res)=>reply(res,async()=>{await generators.refresh();return shareGenerators();}));
+ app.post('/api/sharing/forget',(req,res)=>reply(res,async()=>{await generators.forget(String(req.body.id||''));return shareGenerators();}));
+ /** One machine's models, here or on a paired computer, and the actions on them. "local" is this computer. */
+ app.get('/api/machines/:id',(req,res)=>reply(res,()=>req.params.id==='local'?localModels.public():generators.manage(req.params.id,'list')));
+ app.post('/api/machines/:id/:action',(req,res)=>reply(res,async()=>{if(!['install','cancel','remove'].includes(req.params.action))throw Error('Unknown action.');const body={id:String(req.body.id||''),accept:req.body.accept===true};if(req.params.id!=='local')return generators.manage(req.params.id,req.params.action,body);return req.params.action==='install'?localModels.install(body.id,{accept:body.accept}):req.params.action==='cancel'?localModels.cancelInstall():localModels.remove(body.id);}));
+ app.post('/api/sharing/server',(req,res)=>reply(res,async()=>{const result=await generators.addServer(String(req.body.url||''));return {...result,generators:shareGenerators()};}));
+ app.get('/api/local-models',(req,res)=>reply(res,()=>localModels.public()));
+ app.post('/api/local-models/install',(req,res)=>reply(res,()=>localModels.install(String(req.body.id||''),{accept:req.body.accept===true})));
+ app.post('/api/local-models/cancel',(req,res)=>reply(res,()=>localModels.cancelInstall()));
+ app.post('/api/local-models/remove',(req,res)=>reply(res,()=>localModels.remove(String(req.body.id||''))));
+ app.post('/api/local-models/start',(req,res)=>reply(res,async()=>{await localModels.start(String(req.body.id||''));return localModels.public();}));
+ app.post('/api/local-models/stop',(req,res)=>reply(res,async()=>{await localModels.stop();return localModels.public();}));
+ app.post('/api/generators/test',(req,res)=>reply(res,()=>generators.test(String(req.body.id||''))));
+ app.get('/api/generations',(req,res)=>res.json(generations.list()));
+ app.post('/api/generations',(req,res)=>reply(res,()=>generations.start(req.body)));
+ app.post('/api/generations/:id/cancel',(req,res)=>reply(res,()=>generations.cancel(req.params.id)));
+ app.post('/api/generations/:id/dismiss',(req,res)=>reply(res,()=>generations.dismiss(req.params.id)));
+ app.get('/api/bootstrap',async(req,res)=>res.json({catalog:library.public(),token,connection:bridge.status(),libraryName:project.name,project,base:'/p/'+project.id,scenes:scenes.list(),batches:batches.list(),materials:materials.list(),settings:publicSettings(),generators:generators.public(),generations:generations.list(),localModels:await localModels.public(),sharing:await sharing.public(),workspace:await readJson(path.join(dataRoot,'workspace.json'),{})}));
 app.get('/api/health',(req,res)=>res.json({ok:true,app:'metro-hustle-assets',connection:bridge.status()}));
 app.get('/api/events',(req,res)=>{res.status(200).set({'Content-Type':'application/x-ndjson','Cache-Control':'no-cache','Connection':'keep-alive','X-Accel-Buffering':'no'});res.flushHeaders();clients.add(res);res.write(JSON.stringify({type:'catalog',catalog:library.public()})+'\n');res.write(JSON.stringify({type:'connection',connection:bridge.status()})+'\n');res.write(JSON.stringify({type:'scenes',scenes:scenes.list()})+'\n');res.write(JSON.stringify({type:'batches',batches:batches.list()})+'\n');res.write(JSON.stringify({type:'materials',materials:materials.list()})+'\n');for(const session of store.sessions.values())res.write(JSON.stringify({type:'conversation',conversation:store.public(session)})+'\n');const heartbeat=setInterval(()=>res.write('{"type":"heartbeat"}\n'),15000);req.on('close',()=>{clearInterval(heartbeat);clients.delete(res);});});
 app.get('/api/conversations',(req,res)=>res.json(store.list().map(s=>store.public(s))));
@@ -169,4 +207,4 @@ else{app.use(express.static(path.join(projectRoot,'dist')));app.get('/',(req,res
 app.use((error,req,res,next)=>{if(res.headersSent)return next(error);res.status(error.status||500).json({error:error.type==='entity.too.large'?'Message or screenshot is too large.':'The local server could not process this request.'});});
 const server=app.listen(port,'127.0.0.1',()=>{console.log(`Meshdesk\nhttp://127.0.0.1:${port}\nProjects: ${projects.projectsRoot}\nRegistry: ${dataRoot}/projects.json`);});
 server.on('error',error=>{console.error(error.code==='EADDRINUSE'?`Port ${port} is already in use. Open http://127.0.0.1:${port} or set PORT to another port.`:error.message);process.exit(1);});
-let closing=false;async function shutdown(){if(closing)return;closing=true;for(const pending of runtimes.values()){const r=await pending;await r.conversations.shutdown();await r.exporter.shutdown();for(const res of r.clients)res.end();r.bridge.close();await r.browser?.close();}await vite?.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),3000).unref();}process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);
+let closing=false;async function shutdown(){if(closing)return;closing=true;for(const pending of runtimes.values()){const r=await pending;await r.conversations.shutdown();await r.exporter.shutdown();r.generations?.shutdown();for(const res of r.clients)res.end();r.bridge.close();await r.browser?.close();}localModels.shutdown();await sharing.shutdown();await vite?.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),3000).unref();}process.on('SIGINT',shutdown);process.on('SIGTERM',shutdown);

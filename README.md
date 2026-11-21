@@ -66,13 +66,43 @@ Export conversions run in disposable Blender jobs and never publish a new librar
 
 Original files are preserved. Rename affects working files and retains the stable ID and its conversations. Remove is recoverable. Blender writes are confined to its job directory; networking and unrelated files are blocked. Only successful exports publish a version. Shell tools in the model chat remain read-only; library changes use app-owned tools.
 
+## Models from pictures (image-to-3D)
+
+Blender scripts are the right tool for anything you could measure with a ruler: props, buildings, vehicles. Characters, creatures and other organic shapes are generated from pictures instead. **Generate a model → From pictures** takes a front view (required) and optional left, back and right views, or one turnaround sheet, which it splits into views (check them with Adjust: the order is a guess for sheets without front, side and back left to right). You then choose a machine and one of its models; the dialog says which model is loaded and how long loading another takes. Each machine runs one generation at a time and queues the rest, loading the right model for each. The result is added to the library as a new model; the agent has the same ability as its `model_from_image` tool and then cleans up, reduces, rigs and animates the mesh in Blender.
+
+Three routes are available under **Project settings → 3D generation**. Switch on any of them and choose a default, or be asked each time:
+
+| Route | Cost | Notes |
+|---|---|---|
+| Local model | Free | Runs on this computer, shape only, front view only |
+| Tripo | Pay as you go, about $0.20–$0.40 per model | Labelled slot for each view |
+| Meshy | Credits of a paid Meshy plan | Up to four views, the first is the front |
+
+**Local models.** Meshdesk installs and runs these itself: it checks the graphics hardware, downloads `uv` if the machine has none, builds a private Python environment and fetches the weights into `.data/local-models/`. Nothing touches the system Python, and Delete removes everything again. A model server starts by itself when you generate and stops when Meshdesk quits.
+
+| Model | Licence | Views | Weights | Tested on |
+|---|---|---|---|---|
+| TripoSG (VAST AI Research) | MIT | Front | 8 GB | Apple Silicon M2 with 24 GB (about 10 minutes per model); Windows 10 with an RTX 3070 Ti 8 GB (about 1 minute) |
+| Hunyuan3D 2 multi-view (Tencent) | Tencent Hunyuan 3D 2.0 Community License. Not open source, and not licensed for use in the EU, the UK or South Korea | Front, left, back, right | 5 GB | Windows 10 with an RTX 3070 Ti 8 GB (about 2 minutes per model) |
+| TRELLIS (Microsoft), 8 GB half-precision build | MIT. Its compiled parts are prebuilt Windows files from the community project `IgorAherne/trellis-stable-projectorz`, not from Microsoft; installing asks you to agree to that | One or several, **textured** output | 3 GB | Windows 10 with an RTX 3070 Ti 8 GB (about 1 minute per textured model). Windows with NVIDIA only |
+| TRELLIS.2 (Microsoft), low-memory mode at 1024 | MIT. Prebuilt Windows files from the community project `visualbruno/ComfyUI-Trellis2`. Its image encoder, DINOv3, is a gated Hugging Face model: add a token with access under Advanced | Front, **textured with PBR materials** | 14 GB | Windows 10 with an RTX 3070 Ti 8 GB and 32 GB of memory (2 to 3 minutes per model, 5.3 GB of video memory). Needs 24 GB of main memory. Windows with NVIDIA only |
+| Hunyuan3D 2.1 (Tencent) | Tencent Hunyuan 3D 2.1 Community License, same limits | Front | 8 GB | Apple Silicon M2 with 24 GB (about 11 minutes); Windows 10 with an RTX 3070 Ti 8 GB (about 1.5 minutes, in a low-memory mode that keeps part of the model in main memory; 6.3 GB of video memory) |
+
+Besides the weights, the Python environment takes about 2 GB on a Mac and 7 GB on an NVIDIA machine. Packages are stored once and shared, so a second model adds little more than its weights. Models go in `.data/local-models/`; set `MESHDESK_MODELS_DIR` (or `modelsDirectory` in `config.local.json`) to keep them on another drive. Models already installed in the old folder keep working after the change; new ones go to the new folder. A machine with several models installed offers them in a **Model** list beside **Generate on**.
+
+**Using another computer's graphics card.** A laptop can generate on a desktop that also runs Meshdesk. On the desktop, install a local model and switch on **Share this computer's model**; it shows a name and a pairing code. On the laptop, under **Other computers**, press **Find computers**, pick the desktop and enter the code once. From the laptop's **3D generation** page you can then install, cancel and remove models on the desktop as well. It also appears beside “This computer” in the **Generate on** list: the model is made on the desktop and arrives in the laptop’s library, with live progress. On an RTX 3070 Ti, TripoSG takes about a minute per model. Discovery is a broadcast on UDP port 8793 and the shared server listens on TCP port 8792, so the desktop's firewall must allow Meshdesk (Node) on the private network. The shared server accepts only generation requests that carry the code and locks an address out after ten wrong codes; Meshdesk's main server stays bound to 127.0.0.1. Traffic is plain HTTP, so use it only on a network you trust.
+
+Needs an Apple Silicon Mac with 16 GB of memory or an NVIDIA graphics card. Recipes are in `server/local-models.mjs`: each pins its source code, packages and weights to exact versions, and is shown as experimental on a platform until someone has run it there. An NVIDIA machine gets the newest PyTorch build its driver supports, and the install stops with a clear message if the card cannot be used. Hunyuan3D on NVIDIA and everything on Linux are not yet tested by the authors; reports and fixes are welcome. Large weight files download as eight pieces at once, because Hugging Face limits each connection on some networks. Both models are public; a Hugging Face token (under Advanced, or `HF_TOKEN`) is only needed for models that ask for an account. The local route can instead point at a Hunyuan3D API server on another machine.
+
+Hosted routes send the pictures you choose to that service. API keys are stored in `.data/generators.json`, readable only by your user, and are never sent to the viewer. `TRIPO_API_KEY` and `MESHY_API_KEY` in the environment also work.
+
 ## Local operation
 
 No cloud hosting configuration or API key is needed. AI replies still use the signed-in Codex or Claude service over the internet (Claude runs through the Claude Agent SDK on your local Claude Code sign-in; API-key environment variables are not forwarded); submitted messages, model context and attached images are sent for inference. These conversations are separate from the desktop chat.
 
 Requires Node 22.12+, a signed-in Codex CLI or Claude Code, and Blender at `/Applications/Blender.app/Contents/MacOS/Blender`. Paths can be customized in `config.local.json`. The server binds only to 127.0.0.1 and uses same-origin checks and a per-start write token. Do not expose it publicly.
 
-`npm test` runs conversation, version, library, batch, style guide, shared material, consistency, handoff, project isolation and validation tests. `npm run build` builds the viewer. Environment overrides: `PORT`, `ASSET_LIBRARY_PATH`, `ASSET_REVIEW_DATA`, `CODEX_BIN`, `CLAUDE_BIN`.
+`npm test` runs image-to-3D, local model, sharing, conversation, version, library, batch, style guide, shared material, consistency, handoff, project isolation and validation tests. `npm run build` builds the viewer. Environment overrides: `PORT`, `ASSET_LIBRARY_PATH`, `ASSET_REVIEW_DATA`, `CODEX_BIN`, `CLAUDE_BIN`.
 
 ## Portable project folders
 
